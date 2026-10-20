@@ -18,6 +18,9 @@ CSV_HEADERS = [
     "Website",
     "Industry",
     "Location",
+    "Source URL",
+    "Description",
+    "Verified Fields",
     "Source Note",
     "Created At",
 ]
@@ -41,6 +44,9 @@ def generate_leads_csv(leads: List[LeadRecord]) -> str:
             lead.website,
             lead.industry,
             lead.location,
+            lead.source_url or "",
+            lead.description or "",
+            ", ".join(lead.verified_fields) if lead.verified_fields else "",
             lead.source_note,
             lead.created_at,
         ])

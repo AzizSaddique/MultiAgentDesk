@@ -16,6 +16,7 @@ import {
   UserIcon,
   SparklesIcon,
   AlertTriangleIcon,
+  GlobeIcon,
 } from './icons';
 
 interface AgentDetailProps {
@@ -37,14 +38,28 @@ const PRESET_QUERIES = [
   { topic: 'Cross-Border Payments', industry: 'FinTech', location: 'London, UK' },
 ];
 
+const LIVE_SAMPLE_URLS = [
+  { label: 'HttpBin HTML Fixture', url: 'https://httpbin.org/html' },
+  { label: 'Example Domain', url: 'https://example.com' },
+  { label: 'Wikipedia Foundation', url: 'https://www.wikipedia.org' },
+];
+
 export const AgentDetail: React.FC<AgentDetailProps> = ({ agent, backendStatus }) => {
-  // Research Form State
+  // Mode Selection: 'demo' (mock provider) vs 'live' (Playwright scraper)
+  const [researchMode, setResearchMode] = useState<'demo' | 'live'>('demo');
+
+  // Common Search Criteria
   const [topic, setTopic] = useState<string>('AI Workflow Automation');
   const [industry, setIndustry] = useState<string>('Software & IT');
   const [location, setLocation] = useState<string>('Austin, TX');
   const [maxResults, setMaxResults] = useState<number>(5);
 
-  // Workflow Execution State
+  // Live Research Settings
+  const [urlsInput, setUrlsInput] = useState<string>('https://httpbin.org/html');
+  const [followLinks, setFollowLinks] = useState<boolean>(true);
+  const [maxPagesPerDomain, setMaxPagesPerDomain] = useState<number>(2);
+
+  // Execution & Display State
   const [isLoading, setIsLoading] = useState<boolean>(false);
   const [isExporting, setIsExporting] = useState<boolean>(false);
   const [formError, setFormError] = useState<string | null>(null);
@@ -55,7 +70,7 @@ export const AgentDetail: React.FC<AgentDetailProps> = ({ agent, backendStatus }
       id: 'init-1',
       timestamp: new Date().toLocaleTimeString(),
       type: 'info',
-      message: 'Agent 1 initialized with Mock / Demo Research Provider.',
+      message: 'Agent 1 initialized. Modular providers: MockResearchProvider & PlaywrightResearchProvider ready.',
     },
   ]);
 
@@ -67,7 +82,7 @@ export const AgentDetail: React.FC<AgentDetailProps> = ({ agent, backendStatus }
         type,
         message,
       },
-      ...prev.slice(0, 19), // Keep latest 20
+      ...prev.slice(0, 24),
     ]);
   };
 
@@ -91,25 +106,66 @@ export const AgentDetail: React.FC<AgentDetailProps> = ({ agent, backendStatus }
       return;
     }
 
+    let parsedUrls: string[] = [];
+    if (researchMode === 'live') {
+      parsedUrls = urlsInput
+        .split('\n')
+        .flatMap((line) => line.split(','))
+        .map((u) => u.trim())
+        .filter((u) => u.length > 0);
+
+      if (parsedUrls.length === 0) {
+        setFormError('Live research mode requires at least one public website URL (HTTP/HTTPS only).');
+        return;
+      }
+
+      for (const u of parsedUrls) {
+        if (!u.startsWith('http://') && !u.startsWith('https://')) {
+          setFormError(`Invalid URL "${u}". All URLs must begin with http:// or https://`);
+          return;
+        }
+      }
+    }
+
     setFormError(null);
     setIsLoading(true);
 
     try {
-      addAuditLog('info', `Starting research run for "${cleanTopic}" in ${cleanLocation} (${cleanIndustry})...`);
-      
+      if (researchMode === 'live') {
+        addAuditLog(
+          'info',
+          `Launching Playwright live research for ${parsedUrls.length} target URL(s) (follow links: ${followLinks})...`
+        );
+      } else {
+        addAuditLog('info', `Running demo research simulation for "${cleanTopic}" in ${cleanLocation}...`);
+      }
+
       const response = await searchLeads({
         topic: cleanTopic,
         industry: cleanIndustry,
         location: cleanLocation,
         max_results: maxResults,
+        mode: researchMode,
+        urls: parsedUrls,
+        follow_links: followLinks,
+        max_pages_per_domain: maxPagesPerDomain,
       });
 
       setLeads(response.leads);
       setLastResponse(response);
-      addAuditLog(
-        'success',
-        `Generated ${response.leads.length} demo records via ${response.provider}. (Demo disclaimer attached).`
-      );
+
+      if (response.is_demo) {
+        addAuditLog(
+          'success',
+          `Generated ${response.leads.length} demo records via ${response.provider}. (Demo disclaimer attached).`
+        );
+      } else {
+        const pagesCount = response.pages_crawled ?? 0;
+        addAuditLog(
+          'success',
+          `Playwright live research complete: ${response.leads.length} verified records extracted across ${pagesCount} pages.`
+        );
+      }
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : 'Unknown error during research';
       setFormError(msg);
@@ -138,6 +194,13 @@ export const AgentDetail: React.FC<AgentDetailProps> = ({ agent, backendStatus }
     setTopic(preset.topic);
     setIndustry(preset.industry);
     setLocation(preset.location);
+    setFormError(null);
+  };
+
+  const appendLiveUrl = (url: string) => {
+    if (!urlsInput.includes(url)) {
+      setUrlsInput((prev) => (prev.trim() ? `${prev.trim()}\n${url}` : url));
+    }
     setFormError(null);
   };
 
@@ -231,67 +294,139 @@ export const AgentDetail: React.FC<AgentDetailProps> = ({ agent, backendStatus }
       {/* Agent 1 Interactive Research Console */}
       {isAgentOne && (
         <div className="card">
-          <div className="card-header" style={{ marginBottom: '1.25rem' }}>
+          <div className="card-header" style={{ marginBottom: '1.25rem', flexWrap: 'wrap', gap: '0.75rem' }}>
             <div style={{ display: 'flex', alignItems: 'center', gap: '0.65rem' }}>
               <div style={{
                 width: 28,
                 height: 28,
                 borderRadius: 6,
-                background: 'rgba(6, 182, 212, 0.15)',
+                background: researchMode === 'live' ? 'rgba(16, 185, 129, 0.2)' : 'rgba(6, 182, 212, 0.15)',
                 display: 'flex',
                 alignItems: 'center',
                 justifyContent: 'center'
               }}>
-                <SearchIcon size={16} color="var(--accent-cyan)" />
+                {researchMode === 'live' ? (
+                  <GlobeIcon size={16} color="#34d399" />
+                ) : (
+                  <SearchIcon size={16} color="var(--accent-cyan)" />
+                )}
               </div>
               <div>
                 <h3 className="card-title" style={{ fontSize: '1rem' }}>
-                  Lead Researcher Query Console
+                  Lead Researcher Console
                 </h3>
                 <span style={{ fontSize: '0.72rem', color: 'var(--text-secondary)' }}>
-                  Configured Provider: <strong style={{ color: 'var(--accent-cyan)' }}>Demo / Mock Research Provider</strong> (Modular Playwright scraper slot)
+                  Active Provider:{' '}
+                  <strong style={{ color: researchMode === 'live' ? '#34d399' : 'var(--accent-cyan)' }}>
+                    {researchMode === 'live' ? 'Playwright Live Web Scraper' : 'Demo / Mock Research Provider'}
+                  </strong>
                 </span>
               </div>
             </div>
 
-            <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+            {/* Provider Mode Switcher */}
+            <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
+              <div className="mode-switch-group">
+                <button
+                  type="button"
+                  className={`mode-switch-btn ${researchMode === 'demo' ? 'active' : ''}`}
+                  onClick={() => {
+                    setResearchMode('demo');
+                    setFormError(null);
+                  }}
+                >
+                  <SparklesIcon size={13} color={researchMode === 'demo' ? 'var(--accent-cyan)' : 'var(--text-muted)'} />
+                  Demo Mode (Simulated)
+                </button>
+                <button
+                  type="button"
+                  className={`mode-switch-btn ${researchMode === 'live' ? 'active-live' : ''}`}
+                  onClick={() => {
+                    setResearchMode('live');
+                    setFormError(null);
+                  }}
+                >
+                  <GlobeIcon size={13} color={researchMode === 'live' ? '#34d399' : 'var(--text-muted)'} />
+                  Live Web (Playwright)
+                </button>
+              </div>
+
               {backendStatus && !backendStatus.isOnline && (
                 <span className="badge badge-warning" title="FastAPI backend service is currently offline on http://127.0.0.1:8000">
                   <AlertTriangleIcon size={12} color="#fbbf24" />
                   Backend Offline
                 </span>
               )}
-              <span className="badge badge-cyan">
-                <SparklesIcon size={12} color="var(--accent-cyan)" />
-                Demo Mode Active
-              </span>
             </div>
           </div>
 
-          {/* Quick Presets */}
-          <div style={{ marginBottom: '1.2rem', display: 'flex', alignItems: 'center', gap: '0.5rem', flexWrap: 'wrap' }}>
-            <span style={{ fontSize: '0.72rem', color: 'var(--text-muted)', fontWeight: 600 }}>Quick Presets:</span>
-            {PRESET_QUERIES.map((preset, idx) => (
-              <button
-                key={idx}
-                type="button"
-                className="preset-chip"
-                onClick={() => applyPreset(preset)}
-                disabled={isLoading}
-              >
-                <span>{preset.topic}</span>
-                <span style={{ color: 'var(--text-muted)' }}>({preset.location})</span>
-              </button>
-            ))}
-          </div>
+          {/* Mode-Specific Guidelines / Presets */}
+          {researchMode === 'demo' ? (
+            <div style={{ marginBottom: '1.2rem', display: 'flex', alignItems: 'center', gap: '0.5rem', flexWrap: 'wrap' }}>
+              <span style={{ fontSize: '0.72rem', color: 'var(--text-muted)', fontWeight: 600 }}>Demo Presets:</span>
+              {PRESET_QUERIES.map((preset, idx) => (
+                <button
+                  key={idx}
+                  type="button"
+                  className="preset-chip"
+                  onClick={() => applyPreset(preset)}
+                  disabled={isLoading}
+                >
+                  <span>{preset.topic}</span>
+                  <span style={{ color: 'var(--text-muted)' }}>({preset.location})</span>
+                </button>
+              ))}
+            </div>
+          ) : (
+            <div style={{ marginBottom: '1.2rem', display: 'flex', alignItems: 'center', gap: '0.5rem', flexWrap: 'wrap' }}>
+              <span style={{ fontSize: '0.72rem', color: 'var(--text-muted)', fontWeight: 600 }}>Sample Public URLs:</span>
+              {LIVE_SAMPLE_URLS.map((sample, idx) => (
+                <button
+                  key={idx}
+                  type="button"
+                  className="preset-chip"
+                  onClick={() => appendLiveUrl(sample.url)}
+                  disabled={isLoading}
+                >
+                  <GlobeIcon size={11} color="var(--accent-cyan)" />
+                  <span>{sample.label}</span>
+                </button>
+              ))}
+            </div>
+          )}
 
-          {/* Input Form */}
+          {/* Research Input Form */}
           <form onSubmit={handleRunResearch}>
+            {researchMode === 'live' && (
+              <div style={{ marginBottom: '1rem' }}>
+                <div className="form-group">
+                  <label className="form-label" htmlFor="live-urls-input">
+                    <GlobeIcon size={13} color="#34d399" />
+                    Target Public Website URLs (HTTP / HTTPS Only)
+                  </label>
+                  <textarea
+                    id="live-urls-input"
+                    className="form-input"
+                    rows={3}
+                    placeholder="Enter public URLs to scrape, separated by newlines or commas (e.g. https://httpbin.org/html, https://example.com)"
+                    value={urlsInput}
+                    onChange={(e) => setUrlsInput(e.target.value)}
+                    disabled={isLoading}
+                    style={{ resize: 'vertical', fontFamily: 'var(--font-mono)', fontSize: '0.78rem' }}
+                  />
+                  <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.7rem', color: 'var(--text-muted)', marginTop: '0.2rem' }}>
+                    <span>Playwright will check robots.txt, extract visible company identity, and look for contact info.</span>
+                    <span style={{ color: '#34d399' }}>Never fabricates missing details</span>
+                  </div>
+                </div>
+              </div>
+            )}
+
             <div className="grid-cols-3" style={{ gap: '1rem', marginBottom: '1rem' }}>
               <div className="form-group">
                 <label className="form-label" htmlFor="topic-input">
                   <SearchIcon size={13} color="var(--accent-cyan)" />
-                  Search Topic / Niche Keyword
+                  Search Topic / Research Focus
                 </label>
                 <input
                   id="topic-input"
@@ -307,7 +442,7 @@ export const AgentDetail: React.FC<AgentDetailProps> = ({ agent, backendStatus }
               <div className="form-group">
                 <label className="form-label" htmlFor="industry-input">
                   <BuildingIcon size={13} color="var(--accent-indigo)" />
-                  Target Industry Sector
+                  Industry Sector
                 </label>
                 <input
                   id="industry-input"
@@ -329,7 +464,7 @@ export const AgentDetail: React.FC<AgentDetailProps> = ({ agent, backendStatus }
                   id="location-input"
                   type="text"
                   className="form-input"
-                  placeholder="e.g. Austin, TX, Berlin, Germany, London"
+                  placeholder="e.g. Austin, TX, Berlin, London"
                   value={location}
                   onChange={(e) => setLocation(e.target.value)}
                   disabled={isLoading}
@@ -337,11 +472,50 @@ export const AgentDetail: React.FC<AgentDetailProps> = ({ agent, backendStatus }
               </div>
             </div>
 
+            {/* Live Mode Scraper Options */}
+            {researchMode === 'live' && (
+              <div style={{ display: 'flex', alignItems: 'center', gap: '1.5rem', marginBottom: '1rem', padding: '0.6rem 0.85rem', background: 'rgba(15, 23, 42, 0.45)', borderRadius: '8px', border: '1px solid var(--border-subtle)', flexWrap: 'wrap' }}>
+                <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', fontSize: '0.75rem', color: 'var(--text-secondary)', cursor: 'pointer' }}>
+                  <input
+                    type="checkbox"
+                    checked={followLinks}
+                    onChange={(e) => setFollowLinks(e.target.checked)}
+                    disabled={isLoading}
+                    style={{ accentColor: 'var(--accent-cyan)' }}
+                  />
+                  <span>Follow on-domain subpages (e.g. /about, /contact)</span>
+                </label>
+
+                {followLinks && (
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
+                    <label htmlFor="max-pages-select" style={{ fontSize: '0.72rem', color: 'var(--text-muted)' }}>
+                      Max Subpages per Domain:
+                    </label>
+                    <select
+                      id="max-pages-select"
+                      className="form-select"
+                      value={maxPagesPerDomain}
+                      onChange={(e) => setMaxPagesPerDomain(Number(e.target.value))}
+                      disabled={isLoading}
+                      style={{ padding: '0.25rem 0.5rem', fontSize: '0.72rem' }}
+                    >
+                      <option value={1}>1 Subpage</option>
+                      <option value={2}>2 Subpages</option>
+                      <option value={3}>3 Subpages</option>
+                    </select>
+                  </div>
+                )}
+                <span style={{ fontSize: '0.7rem', color: 'var(--text-muted)', marginLeft: 'auto' }}>
+                  Strict robots.txt & polite 0.4s rate limiting enforced
+                </span>
+              </div>
+            )}
+
             <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: '0.75rem', paddingTop: '0.5rem', borderTop: '1px solid var(--border-subtle)' }}>
               <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
                 <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
                   <label htmlFor="max-results" style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>
-                    Sample Limit:
+                    Record Limit:
                   </label>
                   <select
                     id="max-results"
@@ -357,7 +531,9 @@ export const AgentDetail: React.FC<AgentDetailProps> = ({ agent, backendStatus }
                   </select>
                 </div>
                 <span style={{ fontSize: '0.72rem', color: 'var(--text-muted)' }}>
-                  (Simulated sample set generated by modular backend provider)
+                  {researchMode === 'live'
+                    ? 'Playwright crawls target sites in headless Chromium'
+                    : 'Simulated sample set generated by modular mock provider'}
                 </span>
               </div>
 
@@ -383,12 +559,12 @@ export const AgentDetail: React.FC<AgentDetailProps> = ({ agent, backendStatus }
                   {isLoading ? (
                     <>
                       <div className="spinner" />
-                      Researching Leads...
+                      {researchMode === 'live' ? 'Visiting Web Pages...' : 'Simulating Research...'}
                     </>
                   ) : (
                     <>
-                      <SearchIcon size={14} color="white" />
-                      Run Research Pipeline
+                      {researchMode === 'live' ? <GlobeIcon size={14} color="white" /> : <SearchIcon size={14} color="white" />}
+                      {researchMode === 'live' ? 'Run Live Web Research' : 'Run Demo Pipeline'}
                     </>
                   )}
                 </button>
@@ -405,53 +581,147 @@ export const AgentDetail: React.FC<AgentDetailProps> = ({ agent, backendStatus }
 
           {/* Research Results Display */}
           <div style={{ marginTop: '1.5rem', paddingTop: '1.25rem', borderTop: '1px solid var(--border-subtle)' }}>
-            {/* Demo Notice Banner */}
+            {/* Mode-Specific Status Banner */}
             {lastResponse && (
-              <div className="demo-banner" style={{ marginBottom: '1rem' }}>
-                <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
-                  <div style={{ width: 30, height: 30, borderRadius: 6, background: 'rgba(245, 158, 11, 0.18)', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-                    <SparklesIcon size={16} color="#fbbf24" />
-                  </div>
-                  <div>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-                      <span style={{ fontSize: '0.82rem', fontWeight: 700, color: '#fbbf24' }}>
-                        DEMO / SIMULATED RECORDS
-                      </span>
-                      <span className="badge badge-warning" style={{ fontSize: '0.65rem' }}>
-                        Provider: {lastResponse.provider}
-                      </span>
+              lastResponse.is_demo ? (
+                /* Demo Notice Banner */
+                <div className="demo-banner" style={{ marginBottom: '1rem' }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
+                    <div style={{ width: 30, height: 30, borderRadius: 6, background: 'rgba(245, 158, 11, 0.18)', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                      <SparklesIcon size={16} color="#fbbf24" />
                     </div>
-                    <div style={{ fontSize: '0.73rem', color: 'var(--text-secondary)', marginTop: '0.15rem' }}>
-                      {lastResponse.disclaimer}
+                    <div>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                        <span style={{ fontSize: '0.82rem', fontWeight: 700, color: '#fbbf24' }}>
+                          DEMO / SIMULATED RECORDS
+                        </span>
+                        <span className="badge badge-warning" style={{ fontSize: '0.65rem' }}>
+                          Provider: {lastResponse.provider}
+                        </span>
+                      </div>
+                      <div style={{ fontSize: '0.73rem', color: 'var(--text-secondary)', marginTop: '0.15rem' }}>
+                        {lastResponse.disclaimer}
+                      </div>
                     </div>
                   </div>
-                </div>
 
-                <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-                  <button
-                    className="btn btn-secondary"
-                    onClick={handleExportCsv}
-                    disabled={isExporting}
-                    style={{ fontSize: '0.75rem', padding: '0.35rem 0.75rem' }}
-                  >
-                    <DownloadIcon size={13} color="var(--accent-cyan)" />
-                    {isExporting ? 'Exporting...' : 'Export CSV'}
-                  </button>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                    <button
+                      className="btn btn-secondary"
+                      onClick={handleExportCsv}
+                      disabled={isExporting}
+                      style={{ fontSize: '0.75rem', padding: '0.35rem 0.75rem' }}
+                    >
+                      <DownloadIcon size={13} color="var(--accent-cyan)" />
+                      {isExporting ? 'Exporting...' : 'Export CSV'}
+                    </button>
+                  </div>
                 </div>
-              </div>
+              ) : (
+                /* Live Research Banner */
+                <div className="live-banner" style={{ marginBottom: '1rem' }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
+                    <div style={{ width: 30, height: 30, borderRadius: 6, background: 'rgba(16, 185, 129, 0.2)', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                      <GlobeIcon size={16} color="#34d399" />
+                    </div>
+                    <div>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                        <span style={{ fontSize: '0.82rem', fontWeight: 700, color: '#34d399' }}>
+                          LIVE PUBLIC WEB EXTRACTION (PLAYWRIGHT)
+                        </span>
+                        <span className="badge badge-active" style={{ fontSize: '0.65rem' }}>
+                          Provider: {lastResponse.provider}
+                        </span>
+                        {lastResponse.pages_crawled !== undefined && (
+                          <span style={{ fontSize: '0.68rem', color: 'var(--text-muted)', fontFamily: 'var(--font-mono)' }}>
+                            {lastResponse.pages_crawled} pages visited
+                          </span>
+                        )}
+                      </div>
+                      <div style={{ fontSize: '0.73rem', color: 'var(--text-secondary)', marginTop: '0.15rem' }}>
+                        {lastResponse.disclaimer}
+                      </div>
+                    </div>
+                  </div>
+
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                    <button
+                      className="btn btn-secondary"
+                      onClick={handleExportCsv}
+                      disabled={isExporting}
+                      style={{ fontSize: '0.75rem', padding: '0.35rem 0.75rem' }}
+                    >
+                      <DownloadIcon size={13} color="#34d399" />
+                      {isExporting ? 'Exporting...' : 'Export CSV'}
+                    </button>
+                  </div>
+                </div>
+              )
             )}
 
-            {/* Results Table or Empty State */}
-            {leads.length > 0 ? (
+            {/* Loading State */}
+            {isLoading ? (
+              <div style={{
+                background: 'rgba(10, 14, 23, 0.5)',
+                border: '1px solid var(--border-active)',
+                borderRadius: '8px',
+                padding: '2.5rem 1.5rem',
+                textAlign: 'center',
+                display: 'flex',
+                flexDirection: 'column',
+                alignItems: 'center',
+                gap: '0.75rem'
+              }}>
+                <div className="spinner" style={{ width: 24, height: 24, borderWidth: 3 }} />
+                <div>
+                  <p style={{ fontWeight: 700, color: 'var(--text-primary)', fontSize: '0.9rem' }}>
+                    {researchMode === 'live'
+                      ? 'Executing Playwright Headless Web Scraper...'
+                      : 'Executing Lead Research Pipeline...'}
+                  </p>
+                  <p style={{ fontSize: '0.75rem', color: 'var(--text-secondary)', marginTop: '0.25rem' }}>
+                    {researchMode === 'live'
+                      ? 'Checking robots.txt &bull; Navigating publicly accessible pages &bull; Extracting visible metadata'
+                      : `Querying modular mock provider for "${topic.trim()}" • Synthesizing verified demo schemas`}
+                  </p>
+                </div>
+              </div>
+            ) : lastResponse && leads.length === 0 ? (
+              /* Empty Results State */
+              <div style={{
+                background: 'rgba(245, 158, 11, 0.05)',
+                border: '1px dashed rgba(245, 158, 11, 0.3)',
+                borderRadius: '8px',
+                padding: '2.25rem 1.5rem',
+                textAlign: 'center',
+                color: 'var(--text-secondary)'
+              }}>
+                <div style={{ width: 44, height: 44, borderRadius: 10, background: 'rgba(245, 158, 11, 0.15)', display: 'inline-flex', alignItems: 'center', justifyContent: 'center', marginBottom: '0.5rem' }}>
+                  <AlertTriangleIcon size={22} color="#fbbf24" />
+                </div>
+                <h4 style={{ fontWeight: 700, color: '#fbbf24', fontSize: '0.92rem', marginBottom: '0.35rem' }}>
+                  Zero Leads Found
+                </h4>
+                <p style={{ fontSize: '0.78rem', maxWidth: '480px', margin: '0 auto', color: 'var(--text-secondary)' }}>
+                  No lead records could be extracted for topic <strong>&ldquo;{lastResponse.topic}&rdquo;</strong>.
+                </p>
+                <p style={{ fontSize: '0.72rem', color: 'var(--text-muted)', marginTop: '0.4rem' }}>
+                  {researchMode === 'live'
+                    ? 'Check if the target URLs are publicly reachable, permissive in robots.txt, and contain visible company content.'
+                    : 'Tip: Try broadening your search or click any of the Demo Presets above.'}
+                </p>
+              </div>
+            ) : leads.length > 0 ? (
+              /* Success / Results Table View */
               <div className="lead-table-container">
                 <table className="lead-table">
                   <thead>
                     <tr>
-                      <th style={{ width: '22%' }}>Company & Sector</th>
-                      <th style={{ width: '20%' }}>Decision Maker</th>
-                      <th style={{ width: '20%' }}>Contact Email</th>
-                      <th style={{ width: '18%' }}>Domain & Website</th>
-                      <th style={{ width: '20%' }}>Sample Data Verification</th>
+                      <th style={{ width: '22%' }}>Company & Domain</th>
+                      <th style={{ width: '20%' }}>Decision Maker & Email</th>
+                      <th style={{ width: '24%' }}>Public Business Summary</th>
+                      <th style={{ width: '18%' }}>Source Page URL</th>
+                      <th style={{ width: '16%' }}>Extraction Verification</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -459,47 +729,75 @@ export const AgentDetail: React.FC<AgentDetailProps> = ({ agent, backendStatus }
                       <tr key={lead.id}>
                         <td>
                           <div className="lead-company">
-                            <BuildingIcon size={14} color="var(--accent-cyan)" />
+                            <BuildingIcon size={14} color={lead.is_live ? '#34d399' : 'var(--accent-cyan)'} />
                             {lead.company_name}
                           </div>
                           <div style={{ fontSize: '0.7rem', color: 'var(--text-muted)', display: 'flex', alignItems: 'center', gap: '0.3rem', marginTop: '0.15rem' }}>
-                            <MapPinIcon size={11} color="var(--text-muted)" />
-                            {lead.location} • {lead.industry}
+                            <a
+                              href={lead.website}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="lead-link"
+                              onClick={(e) => {
+                                if (lead.website.includes('.test') || lead.website.includes('.example.com')) {
+                                  e.preventDefault();
+                                }
+                              }}
+                            >
+                              <span>{lead.website.replace(/^https?:\/\/(www\.)?/, '')}</span>
+                              <ExternalLinkIcon size={10} color="var(--accent-cyan)" />
+                            </a>
                           </div>
                         </td>
                         <td>
                           <div className="lead-contact">
-                            <UserIcon size={13} color="var(--text-secondary)" style={{ display: 'inline', marginRight: 4, verticalAlign: 'middle' }} />
+                            <UserIcon size={12} color="var(--text-secondary)" style={{ display: 'inline', marginRight: 4, verticalAlign: 'middle' }} />
                             {lead.contact_name}
                           </div>
-                          <div className="lead-role">{lead.contact_role}</div>
-                        </td>
-                        <td>
-                          <div style={{ fontFamily: 'var(--font-mono)', fontSize: '0.74rem', color: '#38bdf8' }}>
+                          <div style={{ fontFamily: 'var(--font-mono)', fontSize: '0.72rem', color: lead.email.includes('@') ? '#38bdf8' : 'var(--text-muted)', marginTop: '0.15rem' }}>
                             {lead.email}
                           </div>
                         </td>
                         <td>
-                          <a
-                            href={lead.website}
-                            target="_blank"
-                            rel="noopener noreferrer"
-                            className="lead-link"
-                            title="Mock demo website link"
-                            onClick={(e) => e.preventDefault()}
-                          >
-                            <span>{lead.website.replace('https://www.', '')}</span>
-                            <ExternalLinkIcon size={12} color="var(--accent-cyan)" />
-                          </a>
+                          <div style={{ fontSize: '0.73rem', color: 'var(--text-secondary)', lineHeight: 1.35, maxHeight: '3.6em', overflow: 'hidden' }}>
+                            {lead.description || lead.source_note}
+                          </div>
                         </td>
                         <td>
-                          <div style={{ display: 'flex', flexDirection: 'column', gap: '0.2rem' }}>
-                            <span className="badge badge-cyan" style={{ fontSize: '0.65rem', alignSelf: 'flex-start' }}>
-                              Simulated Lead
+                          {lead.source_url && lead.source_url.startsWith('http') ? (
+                            <a
+                              href={lead.source_url}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="lead-link"
+                              style={{ fontSize: '0.72rem', fontFamily: 'var(--font-mono)' }}
+                              onClick={(e) => {
+                                if (lead.source_url?.includes('.test')) e.preventDefault();
+                              }}
+                            >
+                              <span>{lead.source_url.replace(/^https?:\/\//, '').slice(0, 24)}...</span>
+                              <ExternalLinkIcon size={11} color="var(--accent-cyan)" />
+                            </a>
+                          ) : (
+                            <span style={{ fontSize: '0.7rem', color: 'var(--text-muted)', fontFamily: 'var(--font-mono)' }}>
+                              {lead.source_url || 'simulated://mock'}
                             </span>
-                            <span style={{ fontSize: '0.68rem', color: 'var(--text-muted)', fontFamily: 'var(--font-mono)' }}>
-                              {lead.id}
+                          )}
+                        </td>
+                        <td>
+                          <div style={{ display: 'flex', flexDirection: 'column', gap: '0.25rem' }}>
+                            <span className={lead.is_live ? 'badge badge-active' : 'badge badge-cyan'} style={{ fontSize: '0.62rem', alignSelf: 'flex-start' }}>
+                              {lead.is_live ? 'Live Public Web' : 'Simulated Sample'}
                             </span>
+                            {lead.verified_fields && lead.verified_fields.length > 0 && (
+                              <div style={{ display: 'flex', gap: '0.2rem', flexWrap: 'wrap' }}>
+                                {lead.verified_fields.slice(0, 3).map((vf, idx) => (
+                                  <span key={idx} className="tag-verified">
+                                    {vf}
+                                  </span>
+                                ))}
+                              </div>
+                            )}
                           </div>
                         </td>
                       </tr>
@@ -508,6 +806,7 @@ export const AgentDetail: React.FC<AgentDetailProps> = ({ agent, backendStatus }
                 </table>
               </div>
             ) : (
+              /* Initial Welcome / Ready View */
               <div style={{
                 background: 'rgba(10, 14, 23, 0.4)',
                 border: '1px dashed var(--border-subtle)',
@@ -516,13 +815,62 @@ export const AgentDetail: React.FC<AgentDetailProps> = ({ agent, backendStatus }
                 textAlign: 'center',
                 color: 'var(--text-muted)'
               }}>
-                <SearchIcon size={32} color="var(--border-subtle)" />
+                {researchMode === 'live' ? (
+                  <GlobeIcon size={32} color="var(--border-subtle)" />
+                ) : (
+                  <SearchIcon size={32} color="var(--border-subtle)" />
+                )}
                 <p style={{ marginTop: '0.75rem', fontWeight: 600, color: 'var(--text-secondary)', fontSize: '0.85rem' }}>
-                  No lead records generated yet
+                  {researchMode === 'live' ? 'Ready for Live Public-Web Research' : 'No lead records generated yet'}
                 </p>
-                <p style={{ fontSize: '0.75rem', maxWidth: '420px', margin: '0.35rem auto 0 auto' }}>
-                  Enter your search criteria above and click <strong>Run Research Pipeline</strong> to simulate lead extraction and test the CSV export.
+                <p style={{ fontSize: '0.75rem', maxWidth: '440px', margin: '0.35rem auto 0 auto' }}>
+                  {researchMode === 'live'
+                    ? 'Enter target public URLs above or click a Sample Public URL to launch the Playwright headless web scraper.'
+                    : 'Enter your search criteria above and click Run Demo Pipeline to simulate lead extraction.'}
                 </p>
+              </div>
+            )}
+
+            {/* Crawl Diagnostics & Skipped Pages Panel */}
+            {lastResponse && lastResponse.diagnostics && lastResponse.diagnostics.length > 0 && (
+              <div className="diagnostics-box">
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '0.5rem' }}>
+                  <span style={{ fontSize: '0.75rem', fontWeight: 700, color: 'var(--text-primary)', display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
+                    <AlertTriangleIcon size={13} color="#fbbf24" />
+                    Crawl Diagnostics & Page Audit ({lastResponse.diagnostics.length})
+                  </span>
+                  <span style={{ fontSize: '0.68rem', color: 'var(--text-muted)', fontFamily: 'var(--font-mono)' }}>
+                    Robots.txt & Error Trace
+                  </span>
+                </div>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '0.35rem', fontSize: '0.72rem' }}>
+                  {lastResponse.diagnostics.map((diag, idx) => (
+                    <div
+                      key={idx}
+                      style={{
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'space-between',
+                        padding: '0.35rem 0.6rem',
+                        background: 'rgba(10, 14, 23, 0.5)',
+                        borderRadius: '4px',
+                        border: '1px solid rgba(148, 163, 184, 0.08)'
+                      }}
+                    >
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', overflow: 'hidden' }}>
+                        <span className={diag.status === 'success' ? 'badge badge-active' : 'badge badge-warning'} style={{ fontSize: '0.62rem' }}>
+                          {diag.status}
+                        </span>
+                        <span style={{ color: 'var(--text-secondary)', fontFamily: 'var(--font-mono)', textOverflow: 'ellipsis', overflow: 'hidden', whiteSpace: 'nowrap', maxWidth: '280px' }}>
+                          {diag.url}
+                        </span>
+                      </div>
+                      <span style={{ color: 'var(--text-muted)', fontSize: '0.7rem' }}>
+                        {diag.reason}
+                      </span>
+                    </div>
+                  ))}
+                </div>
               </div>
             )}
           </div>
@@ -574,25 +922,25 @@ export const AgentDetail: React.FC<AgentDetailProps> = ({ agent, backendStatus }
                 <TerminalIcon size={16} color="var(--accent-indigo)" />
                 Target Orchestration Architecture
               </h3>
-              <span className="badge badge-cyan">Phase 1 Modular</span>
+              <span className="badge badge-active">Playwright Active</span>
             </div>
 
             <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem', fontSize: '0.78rem' }}>
               <div style={{ display: 'flex', justifyContent: 'space-between', padding: '0.5rem 0.65rem', background: 'rgba(15, 23, 42, 0.5)', borderRadius: '6px' }}>
-                <span style={{ color: 'var(--text-secondary)' }}>Research Provider:</span>
-                <span style={{ color: '#38bdf8', fontFamily: 'var(--font-mono)' }}>MockResearchProvider (Demo Mode)</span>
+                <span style={{ color: 'var(--text-secondary)' }}>Live Web Engine:</span>
+                <span style={{ color: '#34d399', fontFamily: 'var(--font-mono)' }}>Playwright (Chromium Headless)</span>
               </div>
               <div style={{ display: 'flex', justifyContent: 'space-between', padding: '0.5rem 0.65rem', background: 'rgba(15, 23, 42, 0.5)', borderRadius: '6px' }}>
-                <span style={{ color: 'var(--text-secondary)' }}>Future Web Engine:</span>
-                <span style={{ color: 'var(--text-primary)', fontFamily: 'var(--font-mono)' }}>Playwright (Python Async Worker)</span>
+                <span style={{ color: 'var(--text-secondary)' }}>Demo Provider:</span>
+                <span style={{ color: '#38bdf8', fontFamily: 'var(--font-mono)' }}>MockResearchProvider (Simulated)</span>
               </div>
               <div style={{ display: 'flex', justifyContent: 'space-between', padding: '0.5rem 0.65rem', background: 'rgba(15, 23, 42, 0.5)', borderRadius: '6px' }}>
-                <span style={{ color: 'var(--text-secondary)' }}>Agent Backend:</span>
-                <span style={{ color: 'var(--text-primary)', fontFamily: 'var(--font-mono)' }}>FastAPI Sidecar (http://127.0.0.1:8000)</span>
+                <span style={{ color: 'var(--text-secondary)' }}>Robots.txt & Ethics:</span>
+                <span style={{ color: 'var(--text-primary)', fontFamily: 'var(--font-mono)' }}>Strict robotparser Enforcement</span>
               </div>
               <div style={{ display: 'flex', justifyContent: 'space-between', padding: '0.5rem 0.65rem', background: 'rgba(15, 23, 42, 0.5)', borderRadius: '6px' }}>
                 <span style={{ color: 'var(--text-secondary)' }}>Export Engine:</span>
-                <span style={{ color: 'var(--text-primary)', fontFamily: 'var(--font-mono)' }}>RFC 4180 CSV & XLSX Stream</span>
+                <span style={{ color: 'var(--text-primary)', fontFamily: 'var(--font-mono)' }}>RFC 4180 CSV + Source URLs</span>
               </div>
               <div style={{ display: 'flex', justifyContent: 'space-between', padding: '0.5rem 0.65rem', background: 'rgba(15, 23, 42, 0.5)', borderRadius: '6px' }}>
                 <span style={{ color: 'var(--text-secondary)' }}>Outbound Approval:</span>

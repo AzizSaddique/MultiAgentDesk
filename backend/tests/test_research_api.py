@@ -133,3 +133,42 @@ def test_export_csv_endpoint():
     assert "text/csv" in response.headers["content-type"]
     assert "agentdesk_leads.csv" in response.headers["content-disposition"]
     assert "Jane Doe" in response.text
+
+def test_research_leads_empty_result_state():
+    payload = {
+        "topic": "Empty test query with zero-leads",
+        "industry": "Unknown Sector",
+        "location": "Nowhere",
+        "max_results": 5
+    }
+    response = client.post("/api/research/leads", json=payload)
+    assert response.status_code == 200
+    data = response.json()
+    assert data["total_results"] == 0
+    assert data["leads"] == []
+
+def test_research_leads_provider_error_handling():
+    payload = {
+        "topic": "force-fail simulate-error query",
+        "industry": "Software",
+        "location": "Austin, TX",
+        "max_results": 5
+    }
+    response = client.post("/api/research/leads", json=payload)
+    assert response.status_code == 502
+    data = response.json()
+    assert "Research provider execution error" in data["detail"]
+
+def test_research_leads_sector_profiling_cleantech():
+    payload = {
+        "topic": "Solar Storage Infrastructure",
+        "industry": "CleanTech",
+        "location": "Denver, CO",
+        "max_results": 3
+    }
+    response = client.post("/api/research/leads", json=payload)
+    assert response.status_code == 200
+    data = response.json()
+    assert len(data["leads"]) == 3
+    # Check that persona role is relevant to sustainability/cleantech
+    assert any("Sustainability" in lead["contact_role"] or "Grid" in lead["contact_role"] or "Renewable" in lead["contact_role"] for lead in data["leads"])

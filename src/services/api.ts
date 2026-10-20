@@ -117,6 +117,9 @@ export async function downloadLeadsCsv(leads: LeadRecord[]): Promise<void> {
       'Website',
       'Industry',
       'Location',
+      'Source URL',
+      'Description',
+      'Verified Fields',
       'Source Note',
       'Created At',
     ];
@@ -131,6 +134,9 @@ export async function downloadLeadsCsv(leads: LeadRecord[]): Promise<void> {
         escapeCsv(lead.website),
         escapeCsv(lead.industry),
         escapeCsv(lead.location),
+        escapeCsv(lead.source_url || ''),
+        escapeCsv(lead.description || ''),
+        escapeCsv(lead.verified_fields ? lead.verified_fields.join(', ') : ''),
         escapeCsv(lead.source_note),
         escapeCsv(lead.created_at),
       ].join(',')

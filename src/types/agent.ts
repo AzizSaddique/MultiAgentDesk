@@ -37,6 +37,10 @@ export interface LeadRecord {
   location: string;
   source_note: string;
   created_at: string;
+  source_url?: string;
+  description?: string;
+  verified_fields?: string[];
+  is_live?: boolean;
 }
 
 export interface ResearchRequest {
@@ -44,6 +48,16 @@ export interface ResearchRequest {
   industry: string;
   location: string;
   max_results?: number;
+  mode?: 'demo' | 'live';
+  urls?: string[];
+  follow_links?: boolean;
+  max_pages_per_domain?: number;
+}
+
+export interface CrawlDiagnostic {
+  url: string;
+  status: string;
+  reason: string;
 }
 
 export interface ResearchResponse {
@@ -55,4 +69,6 @@ export interface ResearchResponse {
   disclaimer: string;
   total_results: number;
   leads: LeadRecord[];
+  pages_crawled?: number;
+  diagnostics?: CrawlDiagnostic[];
 }

@@ -6,10 +6,12 @@ from typing import List
 try:
     from .models import ResearchRequest, ResearchResponse, CSVExportRequest
     from .providers.mock import MockResearchProvider
+    from .providers.playwright_scraper import PlaywrightResearchProvider
     from .exporter import generate_leads_csv
 except (ImportError, ValueError):
     from models import ResearchRequest, ResearchResponse, CSVExportRequest
     from providers.mock import MockResearchProvider
+    from providers.playwright_scraper import PlaywrightResearchProvider
     from exporter import generate_leads_csv
 
 app = FastAPI(
@@ -32,8 +34,9 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Active research provider (currently Mock/Demo provider)
-research_provider = MockResearchProvider()
+# Providers
+mock_provider = MockResearchProvider()
+live_provider = PlaywrightResearchProvider()
 
 @app.get("/health")
 def health_check():
@@ -41,15 +44,16 @@ def health_check():
         "status": "ok",
         "service": "AgentDesk API",
         "version": "0.1.0",
-        "provider": research_provider.provider_name,
-        "demo_mode": research_provider.is_demo,
+        "provider": mock_provider.provider_name,
+        "available_providers": [mock_provider.provider_name, live_provider.provider_name],
+        "demo_mode": mock_provider.is_demo,
     }
 
 @app.post("/api/research/leads", response_model=ResearchResponse)
 async def research_leads(request: ResearchRequest):
     """
     Execute lead research for a target topic, industry, and location.
-    Currently delegates to the configured modular provider (Mock / Demo provider).
+    Delegates to either MockResearchProvider (Demo Mode) or PlaywrightResearchProvider (Live Web Mode).
     """
     topic_clean = request.topic.strip()
     industry_clean = request.industry.strip()
@@ -61,17 +65,43 @@ async def research_leads(request: ResearchRequest):
             detail="Topic, industry, and location must each contain at least 2 non-whitespace characters."
         )
 
-    leads = await research_provider.search(request)
+    is_live = request.mode == "live"
+    provider = live_provider if is_live else mock_provider
+
+    try:
+        leads = await provider.search(request)
+    except Exception as e:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Research provider execution error: {str(e)}"
+        )
+
+    if is_live:
+        disclaimer = (
+            "Live web research conducted via Playwright. Extracted strictly from publicly accessible pages. "
+            "Source URLs and verified fields recorded; missing fields are left blank. No data was fabricated."
+        )
+        pages_crawled = getattr(provider, "pages_crawled_count", len(leads))
+        diagnostics = getattr(provider, "last_diagnostics", [])
+    else:
+        disclaimer = (
+            "These records are simulated demo samples for workflow validation and pipeline testing. "
+            "No live web scraping was performed."
+        )
+        pages_crawled = 0
+        diagnostics = []
 
     return ResearchResponse(
         topic=topic_clean,
         industry=industry_clean,
         location=location_clean,
-        provider=research_provider.provider_name,
-        is_demo=research_provider.is_demo,
-        disclaimer="These records are simulated demo samples for workflow validation and pipeline testing. No live web scraping was performed.",
+        provider=provider.provider_name,
+        is_demo=provider.is_demo,
+        disclaimer=disclaimer,
         total_results=len(leads),
         leads=leads,
+        pages_crawled=pages_crawled,
+        diagnostics=diagnostics,
     )
 
 @app.post("/api/research/export-csv")

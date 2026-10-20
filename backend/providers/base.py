@@ -4,7 +4,10 @@ Allows swapping Mock provider with Playwright public-web scraper in subsequent m
 """
 from abc import ABC, abstractmethod
 from typing import List
-from ..models import ResearchRequest, LeadRecord
+try:
+    from ..models import ResearchRequest, LeadRecord
+except (ImportError, ValueError):
+    from models import ResearchRequest, LeadRecord
 
 class BaseResearchProvider(ABC):
     @property

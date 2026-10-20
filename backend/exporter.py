@@ -4,7 +4,10 @@ CSV Exporter for AgentDesk Lead Records.
 import csv
 import io
 from typing import List
-from .models import LeadRecord
+try:
+    from .models import LeadRecord
+except (ImportError, ValueError):
+    from models import LeadRecord
 
 CSV_HEADERS = [
     "ID",

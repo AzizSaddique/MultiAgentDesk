@@ -5,8 +5,12 @@ Explicitly labels all generated records as simulated demo data.
 from typing import List
 from datetime import datetime, timezone
 import re
-from .base import BaseResearchProvider
-from ..models import ResearchRequest, LeadRecord
+try:
+    from .base import BaseResearchProvider
+    from ..models import ResearchRequest, LeadRecord
+except (ImportError, ValueError):
+    from providers.base import BaseResearchProvider
+    from models import ResearchRequest, LeadRecord
 
 SAMPLE_PERSONAS = [
     {"name": "Elena Rostova", "role": "Chief Executive Officer"},

@@ -3,9 +3,14 @@ from fastapi import FastAPI, HTTPException, Response
 from fastapi.middleware.cors import CORSMiddleware
 from typing import List
 
-from .models import ResearchRequest, ResearchResponse, CSVExportRequest
-from .providers.mock import MockResearchProvider
-from .exporter import generate_leads_csv
+try:
+    from .models import ResearchRequest, ResearchResponse, CSVExportRequest
+    from .providers.mock import MockResearchProvider
+    from .exporter import generate_leads_csv
+except (ImportError, ValueError):
+    from models import ResearchRequest, ResearchResponse, CSVExportRequest
+    from providers.mock import MockResearchProvider
+    from exporter import generate_leads_csv
 
 app = FastAPI(
     title="AgentDesk API",
@@ -50,10 +55,10 @@ async def research_leads(request: ResearchRequest):
     industry_clean = request.industry.strip()
     location_clean = request.location.strip()
 
-    if not topic_clean or not industry_clean or not location_clean:
+    if len(topic_clean) < 2 or len(industry_clean) < 2 or len(location_clean) < 2:
         raise HTTPException(
             status_code=422,
-            detail="Topic, industry, and location must not be empty or blank."
+            detail="Topic, industry, and location must each contain at least 2 non-whitespace characters."
         )
 
     leads = await research_provider.search(request)

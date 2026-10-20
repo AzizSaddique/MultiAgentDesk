@@ -125,7 +125,7 @@ export function App() {
       <main className="main-content">
         <Header activeView={activeView} currentAgent={selectedAgent} backendStatus={backendStatus} />
         {activeView === 'agent' ? (
-          <AgentDetail agent={selectedAgent} />
+          <AgentDetail agent={selectedAgent} backendStatus={backendStatus} />
         ) : (
           <EnvironmentStatus backendStatus={backendStatus} />
         )}

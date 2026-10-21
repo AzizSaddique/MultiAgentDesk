@@ -228,17 +228,20 @@ def extract_lead_from_html(
     contact_name = ""
     contact_role = ""
 
-    # Discover relevant on-domain subpage links (e.g., /contact, /about, /team)
+    # Discover relevant on-domain subpage links (e.g., /contact, /about, /team, /foundation)
     subpage_links: List[str] = []
+    main_domain = domain.lower().replace("www.", "")
     for a in soup.find_all("a", href=True):
         href = a["href"].strip()
         if href.startswith("#") or href.startswith("javascript:") or href.startswith("tel:"):
             continue
         full_url = urljoin(page_url, href)
         parsed_sub = urlparse(full_url)
-        if parsed_sub.netloc == domain and parsed_sub.scheme in ("http", "https"):
+        sub_domain = parsed_sub.netloc.lower().replace("www.", "")
+        if sub_domain == main_domain and parsed_sub.scheme in ("http", "https"):
             path_lower = parsed_sub.path.lower()
-            if any(k in path_lower for k in ("contact", "about", "team", "company")):
+            link_text = a.get_text().strip().lower()
+            if any(k in path_lower for k in ("contact", "about", "team", "company", "foundation", "reach", "touch")) or any(k in link_text for k in ("contact", "about", "team", "who we are")):
                 if full_url not in subpage_links and full_url != page_url:
                     subpage_links.append(full_url)
 
@@ -433,6 +436,15 @@ class PlaywrightResearchProvider(BaseResearchProvider):
                                     )
                                 )
                                 continue
+                            elif response and response.status >= 400:
+                                self._diagnostics.append(
+                                    CrawlDiagnostic(
+                                        url=target_url,
+                                        status="http_error",
+                                        reason=f"HTTP {response.status}: Failed to retrieve page."
+                                    )
+                                )
+                                continue
 
                             # Extract visible page content
                             html_content = await page.content()
@@ -484,16 +496,43 @@ class PlaywrightResearchProvider(BaseResearchProvider):
                             max_subpages = min(request.max_pages_per_domain or 2, len(subpage_links), 2)
                             for sub_url in subpage_links[:max_subpages]:
                                 # Check robots.txt for subpage
-                                sub_allowed, _ = is_allowed_by_robots(sub_url)
+                                sub_allowed, robots_sub_reason = is_allowed_by_robots(sub_url)
                                 if not sub_allowed:
+                                    self._diagnostics.append(
+                                        CrawlDiagnostic(
+                                            url=sub_url,
+                                            status="disallowed_by_robots",
+                                            reason=robots_sub_reason
+                                        )
+                                    )
                                     continue
 
                                 sub_page = await context.new_page()
                                 try:
                                     # Polite crawl rate limit delay
                                     await asyncio.sleep(0.4)
-                                    await sub_page.goto(sub_url, timeout=9000, wait_until="domcontentloaded")
+                                    sub_resp = await sub_page.goto(sub_url, timeout=9000, wait_until="domcontentloaded")
                                     self._pages_crawled_count += 1
+
+                                    if sub_resp and sub_resp.status in (401, 403):
+                                        self._diagnostics.append(
+                                            CrawlDiagnostic(
+                                                url=sub_url,
+                                                status="access_restricted",
+                                                reason=f"HTTP {sub_resp.status}: Subpage access restricted."
+                                            )
+                                        )
+                                        continue
+                                    elif sub_resp and sub_resp.status >= 400:
+                                        self._diagnostics.append(
+                                            CrawlDiagnostic(
+                                                url=sub_url,
+                                                status="http_error",
+                                                reason=f"HTTP {sub_resp.status}: Subpage returned error status."
+                                            )
+                                        )
+                                        continue
+
                                     sub_html = await sub_page.content()
                                     sub_lead, _ = extract_lead_from_html(sub_html, sub_page.url)
 
@@ -503,9 +542,30 @@ class PlaywrightResearchProvider(BaseResearchProvider):
                                         if "email" not in primary_lead.verified_fields:
                                             primary_lead.verified_fields.append("email (subpage)")
                                         primary_lead.source_note += f" | Email verified on {sub_url}"
+                                        self._diagnostics.append(
+                                            CrawlDiagnostic(
+                                                url=sub_url,
+                                                status="success",
+                                                reason="Verified contact email on discovered subpage."
+                                            )
+                                        )
                                         break
-                                except Exception:
-                                    pass
+                                    else:
+                                        self._diagnostics.append(
+                                            CrawlDiagnostic(
+                                                url=sub_url,
+                                                status="subpage_inspected",
+                                                reason="Subpage inspected; no public business email listed."
+                                            )
+                                        )
+                                except Exception as sub_exc:
+                                    self._diagnostics.append(
+                                        CrawlDiagnostic(
+                                            url=sub_url,
+                                            status="fetch_error",
+                                            reason=f"Subpage navigation failed: {str(sub_exc)[:120]}"
+                                        )
+                                    )
                                 finally:
                                     try:
                                         await sub_page.close()

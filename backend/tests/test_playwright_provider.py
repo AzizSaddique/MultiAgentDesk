@@ -336,3 +336,54 @@ def test_live_research_endpoint_browser_init_failure_reports_clear_disclaimer():
         assert "browser subsystem failed to launch" in data["disclaimer"].lower()
         assert any(d["status"] == "browser_init_failed" for d in data["diagnostics"])
 
+def test_csv_export_preserves_source_url_and_verified_fields():
+    """Verify that CSV export output contains Source URL and Verified Fields accurately."""
+    from backend.models import LeadRecord
+    from backend.exporter import generate_leads_csv
+
+    live_lead = LeadRecord(
+        id="live-lead-testcorp",
+        company_name="TestCorp Public",
+        contact_name="(Not published on page)",
+        contact_role="(Not published on page)",
+        email="contact@testcorp.org",
+        website="https://www.testcorp.org",
+        industry="Technology",
+        location="Global",
+        source_note="[VERIFIED PUBLIC WEB] Extracted from https://www.testcorp.org/contact",
+        created_at="2026-10-21T12:00:00Z",
+        source_url="https://www.testcorp.org/contact",
+        description="Providing public cloud infrastructure for modern developers.",
+        verified_fields=["company_name (title)", "description (meta)", "email (subpage)"],
+        is_live=True
+    )
+
+    csv_content = generate_leads_csv([live_lead])
+    lines = csv_content.strip().split("\r\n")
+    assert len(lines) == 2
+    header = lines[0].split(",")
+    assert "Source URL" in header
+    assert "Verified Fields" in header
+
+    data_line = lines[1]
+    assert "https://www.testcorp.org/contact" in data_line
+    assert "contact@testcorp.org" in data_line
+    assert "email (subpage)" in data_line
+
+def test_subpage_link_discovery_supports_domain_variants():
+    """Verify on-domain discovery matches links whether www. is omitted or included."""
+    html = """
+    <html>
+    <body>
+        <a href="https://example.org/about-us">About Us</a>
+        <a href="https://www.example.org/contact">Contact Team</a>
+        <a href="https://external.net/about">External</a>
+    </body>
+    </html>
+    """
+    lead, sublinks = extract_lead_from_html(html, "https://www.example.org")
+    assert "https://example.org/about-us" in sublinks
+    assert "https://www.example.org/contact" in sublinks
+    assert not any("external.net" in s for s in sublinks)
+
+

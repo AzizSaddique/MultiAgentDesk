@@ -7,4 +7,4 @@ Write-Host "   Binding to: http://127.0.0.1:8000" -ForegroundColor DarkCyan
 Write-Host "   Health Endpoint: http://127.0.0.1:8000/health" -ForegroundColor DarkCyan
 Write-Host "=============================================" -ForegroundColor Cyan
 
-python -m uvicorn main:app --host 127.0.0.1 --port 8000 --reload
+python -m uvicorn main:app --host 127.0.0.1 --port 8000 --reload --loop none

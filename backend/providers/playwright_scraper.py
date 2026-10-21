@@ -4,6 +4,7 @@ Complies with robots.txt, respects access limitations, never fabricates records,
 and records source page URLs and verified fields.
 """
 import asyncio
+import sys
 import re
 import json
 import urllib.robotparser
@@ -261,6 +262,18 @@ def extract_lead_from_html(
 
     return record, subpage_links
 
+def _is_selector_loop(loop: asyncio.AbstractEventLoop) -> bool:
+    """
+    Checks if the event loop is a Windows SelectorEventLoop which does not
+    implement subprocess creation required by Playwright async transport.
+    """
+    if sys.platform != "win32":
+        return False
+    selector_cls = getattr(asyncio, "_WindowsSelectorEventLoop", None)
+    if selector_cls and isinstance(loop, selector_cls):
+        return True
+    return isinstance(loop, asyncio.SelectorEventLoop)
+
 class PlaywrightResearchProvider(BaseResearchProvider):
     """
     Modular Playwright public-web research provider.
@@ -290,6 +303,41 @@ class PlaywrightResearchProvider(BaseResearchProvider):
     async def search(self, request: ResearchRequest) -> List[LeadRecord]:
         """
         Executes live public-web extraction across user-provided target URLs.
+        Handles Windows event loop compatibility by delegating to a dedicated
+        ProactorEventLoop thread if the active loop is a SelectorEventLoop.
+        """
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+
+        if loop is not None and _is_selector_loop(loop):
+            # Windows SelectorEventLoop does not support create_subprocess_exec.
+            # Delegate browser automation to a dedicated worker thread running a ProactorEventLoop.
+            # Do NOT call set_event_loop_policy inside this active loop.
+            def _thread_worker() -> List[LeadRecord]:
+                proactor_loop = asyncio.ProactorEventLoop()
+                asyncio.set_event_loop(proactor_loop)
+                try:
+                    return proactor_loop.run_until_complete(self._execute_search(request))
+                finally:
+                    try:
+                        pending = asyncio.all_tasks(proactor_loop)
+                        for t in pending:
+                            t.cancel()
+                        if pending:
+                            proactor_loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
+                    except Exception:
+                        pass
+                    proactor_loop.close()
+
+            return await asyncio.to_thread(_thread_worker)
+        else:
+            return await self._execute_search(request)
+
+    async def _execute_search(self, request: ResearchRequest) -> List[LeadRecord]:
+        """
+        Internal implementation of live web extraction via Playwright.
         """
         self._diagnostics = []
         self._pages_crawled_count = 0
@@ -326,145 +374,173 @@ class PlaywrightResearchProvider(BaseResearchProvider):
         if not valid_targets:
             return []
 
-        from playwright.async_api import async_playwright
+        browser = None
+        context = None
 
         try:
+            from playwright.async_api import async_playwright
+
             async with async_playwright() as p:
-                browser = await p.chromium.launch(
-                    headless=True,
-                    args=["--disable-gpu", "--no-sandbox", "--disable-dev-shm-usage"]
-                )
-                context = await browser.new_context(
-                    user_agent=USER_AGENT,
-                    viewport={"width": 1280, "height": 800},
-                    java_script_enabled=True,
-                )
+                try:
+                    browser = await p.chromium.launch(
+                        headless=True,
+                        args=["--disable-gpu", "--no-sandbox", "--disable-dev-shm-usage"]
+                    )
+                    context = await browser.new_context(
+                        user_agent=USER_AGENT,
+                        viewport={"width": 1280, "height": 800},
+                        java_script_enabled=True,
+                    )
 
-                for target_url in valid_targets:
-                    if len(results) >= (request.max_results or 5):
-                        break
+                    for target_url in valid_targets:
+                        if len(results) >= (request.max_results or 5):
+                            break
 
-                    parsed_target = urlparse(target_url)
-                    domain = parsed_target.netloc
+                        parsed_target = urlparse(target_url)
+                        domain = parsed_target.netloc
 
-                    if domain in visited_domains:
-                        continue
-                    visited_domains.add(domain)
+                        if domain in visited_domains:
+                            continue
+                        visited_domains.add(domain)
 
-                    # 1. Check robots.txt
-                    allowed, robots_reason = is_allowed_by_robots(target_url)
-                    if not allowed:
-                        self._diagnostics.append(
-                            CrawlDiagnostic(
-                                url=target_url,
-                                status="disallowed_by_robots",
-                                reason=robots_reason
-                            )
-                        )
-                        continue
-
-                    # 2. Navigate to Target URL via Playwright
-                    page = await context.new_page()
-                    primary_lead: Optional[LeadRecord] = None
-                    subpage_links: List[str] = []
-
-                    try:
-                        response = await page.goto(target_url, timeout=12000, wait_until="domcontentloaded")
-                        self._pages_crawled_count += 1
-
-                        if response and response.status in (401, 403):
+                        # 1. Check robots.txt
+                        allowed, robots_reason = is_allowed_by_robots(target_url)
+                        if not allowed:
                             self._diagnostics.append(
                                 CrawlDiagnostic(
                                     url=target_url,
-                                    status="access_restricted",
-                                    reason=f"HTTP {response.status}: Access restricted by server."
+                                    status="disallowed_by_robots",
+                                    reason=robots_reason
                                 )
                             )
                             continue
 
-                        # Extract visible page content
-                        html_content = await page.content()
-                        lead, discovered_links = extract_lead_from_html(
-                            html_content,
-                            page.url,
-                            industry=request.industry,
-                            location=request.location,
-                            topic=request.topic
-                        )
+                        # 2. Navigate to Target URL via Playwright
+                        page = await context.new_page()
+                        primary_lead: Optional[LeadRecord] = None
+                        subpage_links: List[str] = []
 
-                        if lead is None:
-                            self._diagnostics.append(
-                                CrawlDiagnostic(
-                                    url=target_url,
-                                    status="challenge_detected",
-                                    reason="Bot challenge or CAPTCHA screen detected; skipped without attempting bypass."
+                        try:
+                            response = await page.goto(target_url, timeout=12000, wait_until="domcontentloaded")
+                            self._pages_crawled_count += 1
+
+                            if response and response.status in (401, 403):
+                                self._diagnostics.append(
+                                    CrawlDiagnostic(
+                                        url=target_url,
+                                        status="access_restricted",
+                                        reason=f"HTTP {response.status}: Access restricted by server."
+                                    )
                                 )
-                            )
-                            continue
-
-                        primary_lead = lead
-                        subpage_links = discovered_links
-
-                        self._diagnostics.append(
-                            CrawlDiagnostic(
-                                url=target_url,
-                                status="success",
-                                reason=f"Extracted {len(lead.verified_fields)} verified public fields."
-                            )
-                        )
-
-                    except Exception as exc:
-                        self._diagnostics.append(
-                            CrawlDiagnostic(
-                                url=target_url,
-                                status="fetch_error",
-                                reason=f"Page navigation failed: {str(exc)[:120]}"
-                            )
-                        )
-                    finally:
-                        await page.close()
-
-                    # 3. Follow On-Domain Links (if contact info like email is missing and follow_links is True)
-                    if primary_lead and request.follow_links and primary_lead.email == "(No public email listed)":
-                        max_subpages = min(request.max_pages_per_domain or 2, len(subpage_links), 2)
-                        for sub_url in subpage_links[:max_subpages]:
-                            # Check robots.txt for subpage
-                            sub_allowed, _ = is_allowed_by_robots(sub_url)
-                            if not sub_allowed:
                                 continue
 
-                            sub_page = await context.new_page()
-                            try:
-                                # Polite crawl rate limit delay
-                                await asyncio.sleep(0.4)
-                                await sub_page.goto(sub_url, timeout=9000, wait_until="domcontentloaded")
-                                self._pages_crawled_count += 1
-                                sub_html = await sub_page.content()
-                                sub_lead, _ = extract_lead_from_html(sub_html, sub_page.url)
+                            # Extract visible page content
+                            html_content = await page.content()
+                            lead, discovered_links = extract_lead_from_html(
+                                html_content,
+                                page.url,
+                                industry=request.industry,
+                                location=request.location,
+                                topic=request.topic
+                            )
 
-                                if sub_lead and sub_lead.email != "(No public email listed)":
-                                    primary_lead.email = sub_lead.email
-                                    primary_lead.source_url = sub_url
-                                    if "email" not in primary_lead.verified_fields:
-                                        primary_lead.verified_fields.append("email (subpage)")
-                                    primary_lead.source_note += f" | Email verified on {sub_url}"
-                                    break
+                            if lead is None:
+                                self._diagnostics.append(
+                                    CrawlDiagnostic(
+                                        url=target_url,
+                                        status="challenge_detected",
+                                        reason="Bot challenge or CAPTCHA screen detected; skipped without attempting bypass."
+                                    )
+                                )
+                                continue
+
+                            primary_lead = lead
+                            subpage_links = discovered_links
+
+                            self._diagnostics.append(
+                                CrawlDiagnostic(
+                                    url=target_url,
+                                    status="success",
+                                    reason=f"Extracted {len(lead.verified_fields)} verified public fields."
+                                )
+                            )
+
+                        except Exception as exc:
+                            self._diagnostics.append(
+                                CrawlDiagnostic(
+                                    url=target_url,
+                                    status="fetch_error",
+                                    reason=f"Page navigation failed: {str(exc)[:120]}"
+                                )
+                            )
+                        finally:
+                            try:
+                                await page.close()
                             except Exception:
                                 pass
-                            finally:
-                                await sub_page.close()
 
-                    if primary_lead:
-                        results.append(primary_lead)
+                        # 3. Follow On-Domain Links (if contact info like email is missing and follow_links is True)
+                        if primary_lead and request.follow_links and primary_lead.email == "(No public email listed)":
+                            max_subpages = min(request.max_pages_per_domain or 2, len(subpage_links), 2)
+                            for sub_url in subpage_links[:max_subpages]:
+                                # Check robots.txt for subpage
+                                sub_allowed, _ = is_allowed_by_robots(sub_url)
+                                if not sub_allowed:
+                                    continue
 
-                await browser.close()
+                                sub_page = await context.new_page()
+                                try:
+                                    # Polite crawl rate limit delay
+                                    await asyncio.sleep(0.4)
+                                    await sub_page.goto(sub_url, timeout=9000, wait_until="domcontentloaded")
+                                    self._pages_crawled_count += 1
+                                    sub_html = await sub_page.content()
+                                    sub_lead, _ = extract_lead_from_html(sub_html, sub_page.url)
+
+                                    if sub_lead and sub_lead.email != "(No public email listed)":
+                                        primary_lead.email = sub_lead.email
+                                        primary_lead.source_url = sub_url
+                                        if "email" not in primary_lead.verified_fields:
+                                            primary_lead.verified_fields.append("email (subpage)")
+                                        primary_lead.source_note += f" | Email verified on {sub_url}"
+                                        break
+                                except Exception:
+                                    pass
+                                finally:
+                                    try:
+                                        await sub_page.close()
+                                    except Exception:
+                                        pass
+
+                        if primary_lead:
+                            results.append(primary_lead)
+
+                finally:
+                    if context is not None:
+                        try:
+                            await context.close()
+                        except Exception:
+                            pass
+                    if browser is not None:
+                        try:
+                            await browser.close()
+                        except Exception:
+                            pass
 
         except Exception as global_exc:
+            error_name = type(global_exc).__name__
+            error_details = str(global_exc).strip()
+            if isinstance(global_exc, NotImplementedError) and sys.platform == "win32":
+                reason = "Playwright requires a Windows ProactorEventLoop to launch browser subprocesses."
+            elif error_details:
+                reason = f"Playwright browser error ({error_name}): {error_details[:140]}"
+            else:
+                reason = f"Playwright browser error: {error_name}"
             self._diagnostics.append(
                 CrawlDiagnostic(
                     url="playwright_subsystem",
                     status="browser_init_failed",
-                    reason=f"Playwright browser error: {str(global_exc)[:140]}"
+                    reason=reason
                 )
             )
 

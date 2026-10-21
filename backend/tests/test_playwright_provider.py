@@ -3,17 +3,20 @@ Tests for Playwright Live Web Research Provider and HTML Extraction Engine.
 All tests use local HTML fixtures and mocked network/page components;
 they do not depend on external live websites or internet access.
 """
+import sys
+import asyncio
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 from fastapi.testclient import TestClient
 
-from backend.main import app
-from backend.models import ResearchRequest
+from backend.main import app, live_provider
+from backend.models import ResearchRequest, CrawlDiagnostic
 from backend.providers.playwright_scraper import (
     validate_target_url,
     is_allowed_by_robots,
     _clean_extracted_emails,
     extract_lead_from_html,
+    _is_selector_loop,
     PlaywrightResearchProvider,
 )
 
@@ -231,3 +234,105 @@ def test_live_research_endpoint_invalid_url_diagnostic():
     assert data["is_demo"] is False
     assert data["total_results"] == 0
     assert any(diag["status"] == "invalid_url" for diag in data["diagnostics"])
+
+def test_is_selector_loop_detection():
+    """Verify _is_selector_loop correctly flags Windows SelectorEventLoop and allows ProactorEventLoop."""
+    if sys.platform == "win32":
+        selector_loop = asyncio.SelectorEventLoop()
+        try:
+            assert _is_selector_loop(selector_loop) is True
+        finally:
+            selector_loop.close()
+
+        proactor_loop = asyncio.ProactorEventLoop()
+        try:
+            assert _is_selector_loop(proactor_loop) is False
+        finally:
+            proactor_loop.close()
+
+def test_playwright_not_implemented_error_diagnostic():
+    """Verify that when browser launch fails with NotImplementedError, clear diagnostic is recorded."""
+    provider = PlaywrightResearchProvider()
+    req = ResearchRequest(
+        topic="CleanTech",
+        industry="Energy",
+        location="Austin",
+        mode="live",
+        urls=["https://example.com"]
+    )
+
+    with patch("playwright.async_api.async_playwright") as mock_ap:
+        mock_p = AsyncMock()
+        mock_ap.return_value.__aenter__.return_value = mock_p
+        mock_p.chromium.launch.side_effect = NotImplementedError()
+
+        results = asyncio.run(provider._execute_search(req))
+        assert results == []
+        assert len(provider.last_diagnostics) == 1
+        diag = provider.last_diagnostics[0]
+        assert diag.status == "browser_init_failed"
+        assert diag.url == "playwright_subsystem"
+        if sys.platform == "win32":
+            assert "ProactorEventLoop" in diag.reason
+
+def test_playwright_provider_closes_browser_and_context_on_exception():
+    """Verify browser and context resources are properly closed even after navigation exceptions."""
+    provider = PlaywrightResearchProvider()
+    req = ResearchRequest(
+        topic="CleanTech",
+        industry="Energy",
+        location="Austin",
+        mode="live",
+        urls=["https://example.com"]
+    )
+
+    with patch("playwright.async_api.async_playwright") as mock_ap:
+        mock_p = AsyncMock()
+        mock_browser = AsyncMock()
+        mock_context = AsyncMock()
+        mock_page = AsyncMock()
+
+        mock_ap.return_value.__aenter__.return_value = mock_p
+        mock_p.chromium.launch.return_value = mock_browser
+        mock_browser.new_context.return_value = mock_context
+        mock_context.new_page.return_value = mock_page
+        mock_page.goto.side_effect = RuntimeError("Fatal page crash")
+
+        results = asyncio.run(provider._execute_search(req))
+        assert results == []
+        # Ensure cleanup occurred
+        assert mock_context.close.called
+        assert mock_browser.close.called
+
+def test_live_research_endpoint_browser_init_failure_reports_clear_disclaimer():
+    """Verify that when browser initialization fails, API reports failure disclaimer rather than success."""
+    with patch.object(live_provider, "search") as mock_search:
+        async def fake_search(req):
+            live_provider._diagnostics = [
+                CrawlDiagnostic(
+                    url="playwright_subsystem",
+                    status="browser_init_failed",
+                    reason="Playwright requires a Windows ProactorEventLoop to launch browser subprocesses."
+                )
+            ]
+            live_provider._pages_crawled_count = 0
+            return []
+        mock_search.side_effect = fake_search
+
+        payload = {
+            "topic": "CleanTech",
+            "industry": "Energy",
+            "location": "Austin",
+            "mode": "live",
+            "urls": ["https://example.com"]
+        }
+        response = client.post("/api/research/leads", json=payload)
+        assert response.status_code == 200
+        data = response.json()
+        assert data["provider"] == "playwright-live-provider"
+        assert data["is_demo"] is False
+        assert data["total_results"] == 0
+        assert data["leads"] == []
+        assert "browser subsystem failed to launch" in data["disclaimer"].lower()
+        assert any(d["status"] == "browser_init_failed" for d in data["diagnostics"])
+

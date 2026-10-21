@@ -1,7 +1,17 @@
+import sys
+import asyncio
 import uvicorn
 from fastapi import FastAPI, HTTPException, Response
 from fastapi.middleware.cors import CORSMiddleware
 from typing import List
+
+# On Windows, configure default policy to ProactorEventLoop before loops are started
+if sys.platform == "win32":
+    try:
+        if not isinstance(asyncio.get_event_loop_policy(), asyncio.WindowsProactorEventLoopPolicy):
+            asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
+    except Exception:
+        pass
 
 try:
     from .models import ResearchRequest, ResearchResponse, CSVExportRequest
@@ -77,12 +87,24 @@ async def research_leads(request: ResearchRequest):
         )
 
     if is_live:
-        disclaimer = (
-            "Live web research conducted via Playwright. Extracted strictly from publicly accessible pages. "
-            "Source URLs and verified fields recorded; missing fields are left blank. No data was fabricated."
-        )
         pages_crawled = getattr(provider, "pages_crawled_count", len(leads))
         diagnostics = getattr(provider, "last_diagnostics", [])
+        has_init_failure = any(d.status == "browser_init_failed" for d in diagnostics)
+        if has_init_failure:
+            disclaimer = (
+                "Live web research could not be performed: The Playwright browser subsystem failed to launch. "
+                "Inspect the crawl diagnostics for specific failure details."
+            )
+        elif len(leads) == 0 and len(diagnostics) > 0 and all(d.status in ("missing_urls", "invalid_url") for d in diagnostics):
+            disclaimer = (
+                "Live web research skipped: No valid target website URLs were supplied. "
+                "Provide at least one accessible HTTP/HTTPS URL."
+            )
+        else:
+            disclaimer = (
+                "Live web research conducted via Playwright. Extracted strictly from publicly accessible pages. "
+                "Source URLs and verified fields recorded; missing fields are left blank. No data was fabricated."
+            )
     else:
         disclaimer = (
             "These records are simulated demo samples for workflow validation and pipeline testing. "
@@ -119,4 +141,5 @@ def export_leads_csv(payload: CSVExportRequest):
     )
 
 if __name__ == "__main__":
-    uvicorn.run(app, host="127.0.0.1", port=8000)
+    uvicorn.run("backend.main:app" if __package__ else "main:app", host="127.0.0.1", port=8000, loop="none")
+

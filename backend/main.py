@@ -1,5 +1,7 @@
 import sys
+import os
 import asyncio
+from datetime import datetime, timezone
 import uvicorn
 from fastapi import FastAPI, HTTPException, Response
 from fastapi.middleware.cors import CORSMiddleware
@@ -14,15 +16,44 @@ if sys.platform == "win32":
         pass
 
 try:
-    from .models import ResearchRequest, ResearchResponse, CSVExportRequest
+    from .models import (
+        ResearchRequest, ResearchResponse, CSVExportRequest,
+        OutreachDraftRequest, OutreachDraftResponse,
+        SendOutreachRequest, SendOutreachResponse, AIProviderConfig,
+    )
     from .providers.mock import MockResearchProvider
     from .providers.playwright_scraper import PlaywrightResearchProvider
+    from .providers.llm import get_llm_provider
+    from .providers.email_dispatcher import (
+        dispatch_outreach_email, get_dispatch_status_info,
+        DispatchConfigurationError, DispatchDeliveryError
+    )
     from .exporter import generate_leads_csv
+    from .env_loader import load_root_env
+    from .dispatch_tracker import global_dispatch_tracker
 except (ImportError, ValueError):
-    from models import ResearchRequest, ResearchResponse, CSVExportRequest
+    from models import (
+        ResearchRequest, ResearchResponse, CSVExportRequest,
+        OutreachDraftRequest, OutreachDraftResponse,
+        SendOutreachRequest, SendOutreachResponse, AIProviderConfig,
+    )
     from providers.mock import MockResearchProvider
     from providers.playwright_scraper import PlaywrightResearchProvider
+    from providers.llm import get_llm_provider
+    from providers.email_dispatcher import (
+        dispatch_outreach_email, get_dispatch_status_info,
+        DispatchConfigurationError, DispatchDeliveryError
+    )
     from exporter import generate_leads_csv
+    from env_loader import load_root_env
+    from dispatch_tracker import global_dispatch_tracker
+
+# Load root .env into environment if present
+load_root_env(override=False)
+
+# In-memory registry of active generated drafts for strict verification tracking
+DRAFT_REGISTRY = {}
+
 
 app = FastAPI(
     title="AgentDesk API",
@@ -140,6 +171,191 @@ def export_leads_csv(payload: CSVExportRequest):
         }
     )
 
+@app.get("/api/outreach/providers")
+def get_outreach_providers():
+    """
+    Returns available AI drafting providers and email dispatch status.
+    """
+    return {
+        "providers": [
+            {
+                "id": "template",
+                "name": "Built-in Grounded Drafter",
+                "description": "Deterministic, zero-leakage drafter using strictly verified public metadata. Fast & offline-ready.",
+                "requires_key": False,
+                "is_available": True,
+            },
+            {
+                "id": "ollama",
+                "name": "Local Ollama (Offline LLM)",
+                "description": "Connects to a local Ollama instance (default: http://localhost:11434, model: llama3). Private & local.",
+                "requires_key": False,
+                "is_available": True,
+            },
+            {
+                "id": "openai",
+                "name": "Cloud AI (OpenAI Compatible)",
+                "description": "Connects to any OpenAI-compatible API endpoint (OpenAI, Groq, OpenRouter, Azure).",
+                "requires_key": True,
+                "is_available": bool(os.environ.get("AGENTDESK_LLM_API_KEY") or os.environ.get("OPENAI_API_KEY")),
+            },
+        ],
+        "dispatch": get_dispatch_status_info(),
+    }
+
+@app.post("/api/outreach/draft", response_model=OutreachDraftResponse)
+async def draft_outreach(request: OutreachDraftRequest):
+    """
+    Generates personalized outreach drafts for selected lead records.
+    Strictly grounded in verified public metadata without fabricating names or unverified claims.
+    """
+    if not request.leads:
+        raise HTTPException(status_code=422, detail="At least one lead record must be selected for outreach drafting.")
+    if len(request.service_offering.strip()) < 2:
+        raise HTTPException(status_code=422, detail="Service offering description must be at least 2 characters.")
+
+    try:
+        provider = get_llm_provider(request.ai_config)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"AI Provider configuration error: {str(e)}")
+
+    drafts = []
+    verified_count = 0
+    missing_count = 0
+
+    for lead in request.leads:
+        try:
+            draft = await provider.draft_lead_outreach(
+                lead=lead,
+                service_offering=request.service_offering.strip(),
+                tone=request.tone or "professional",
+                sender_name=request.sender_name or "AgentDesk Operator",
+                sender_company=request.sender_company or "AgentDesk",
+            )
+            drafts.append(draft)
+            DRAFT_REGISTRY[draft.id] = draft
+            if draft.has_verified_email:
+                verified_count += 1
+            else:
+                missing_count += 1
+        except Exception as exc:
+            raise HTTPException(
+                status_code=502,
+                detail=f"Outreach drafting error via {provider.display_name}: {str(exc)}"
+            )
+
+    return OutreachDraftResponse(
+        drafts=drafts,
+        total=len(drafts),
+        verified_email_count=verified_count,
+        missing_email_count=missing_count,
+        provider_used=provider.display_name,
+    )
+
+@app.post("/api/outreach/send", response_model=SendOutreachResponse)
+async def send_outreach(request: SendOutreachRequest):
+    """
+    Explicit Human Approval Gate for Outreach Dispatch.
+    Transmission is strictly blocked unless the human operator explicitly approved the draft
+    and the target lead has a verified public email address.
+    Dispatches via configured SMTP / API provider or clearly identifies simulation mode.
+    Enforces duplicate-send protection and strict public email verification.
+    """
+    if not request.approved:
+        raise HTTPException(
+            status_code=400,
+            detail="Safety Gate: Outreach transmission requires explicit operator approval ('approved: true')."
+        )
+
+    recipient = (request.recipient_email or "").strip()
+    subject_clean = request.subject.strip()
+    body_clean = request.body.strip()
+
+    if not subject_clean or not body_clean:
+        raise HTTPException(
+            status_code=422,
+            detail="Subject and email body must not be empty."
+        )
+
+    # 1. Duplicate-send protection (Draft ID & Content idempotency)
+    duplicate = global_dispatch_tracker.check_duplicate(
+        draft_id=request.draft_id,
+        recipient_email=recipient,
+        subject=subject_clean,
+        body=body_clean,
+    )
+    if duplicate:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"Duplicate Send Blocked: Outreach draft '{request.draft_id}' has already been dispatched "
+                f"to {duplicate.recipient_email} at {duplicate.dispatched_at} (Provider: {duplicate.provider}). "
+                "Repeated transmission is restricted to prevent duplicate emails."
+            )
+        )
+
+    # 2. Strict public email verification check
+    if not recipient or recipient == "(No public email listed)" or "@" not in recipient or "." not in recipient.split("@")[-1]:
+        raise HTTPException(
+            status_code=422,
+            detail="Dispatch Blocked: Target lead lacks a verified public email address. Transmission to unverified leads is restricted."
+        )
+
+    # If the draft was recorded in DRAFT_REGISTRY, its verified status is authoritative:
+    if request.draft_id in DRAFT_REGISTRY:
+        reg_draft = DRAFT_REGISTRY[request.draft_id]
+        if not reg_draft.has_verified_email:
+            raise HTTPException(
+                status_code=422,
+                detail="Dispatch Blocked: Target lead lacks a verified public email address. A syntactically valid email alone does not count as verified."
+            )
+        if reg_draft.recipient_email.lower() != recipient.lower():
+            raise HTTPException(
+                status_code=422,
+                detail="Dispatch Blocked: Recipient address does not match the verified public email recorded for this draft."
+            )
+    elif request.has_verified_email is False:
+        raise HTTPException(
+            status_code=422,
+            detail="Dispatch Blocked: Target lead lacks a verified public email address. A syntactically valid email alone does not count as verified."
+        )
+
+    try:
+        result = dispatch_outreach_email(
+            recipient_email=recipient,
+            subject=subject_clean,
+            body=body_clean,
+            draft_id=request.draft_id,
+        )
+    except DispatchConfigurationError as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+    except DispatchDeliveryError as exc:
+        raise HTTPException(status_code=502, detail=str(exc))
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Unexpected dispatch error: {str(exc)}")
+
+    # Record dispatch in idempotency registry only on success
+    global_dispatch_tracker.record_dispatch(
+        draft_id=request.draft_id,
+        recipient_email=recipient,
+        subject=subject_clean,
+        body=body_clean,
+        status=result.status,
+        provider=result.provider,
+    )
+
+    now_iso = datetime.now(timezone.utc).isoformat()
+    return SendOutreachResponse(
+        draft_id=request.draft_id,
+        status=result.status,
+        recipient_email=recipient,
+        message=result.message,
+        dispatched_at=now_iso,
+        is_simulated=result.is_simulated,
+        provider=result.provider,
+    )
+
 if __name__ == "__main__":
     uvicorn.run("backend.main:app" if __package__ else "main:app", host="127.0.0.1", port=8000, loop="none")
+
 

@@ -17,7 +17,9 @@ import {
   SparklesIcon,
   AlertTriangleIcon,
   GlobeIcon,
+  MailIcon,
 } from './icons';
+import { OutreachConsole } from './OutreachConsole';
 
 interface AgentDetailProps {
   agent: AgentModel;
@@ -64,7 +66,32 @@ export const AgentDetail: React.FC<AgentDetailProps> = ({ agent, backendStatus }
   const [isExporting, setIsExporting] = useState<boolean>(false);
   const [formError, setFormError] = useState<string | null>(null);
   const [leads, setLeads] = useState<LeadRecord[]>([]);
+  const [selectedLeadIds, setSelectedLeadIds] = useState<string[]>([]);
+  const [pendingDraftsCount, setPendingDraftsCount] = useState<number>(0);
   const [lastResponse, setLastResponse] = useState<ResearchResponse | null>(null);
+
+  const toggleSelectLead = (id: string) => {
+    setSelectedLeadIds((prev) =>
+      prev.includes(id) ? prev.filter((item) => item !== id) : [...prev, id]
+    );
+  };
+
+  const selectAllLeads = () => {
+    setSelectedLeadIds(leads.map((l) => l.id));
+  };
+
+  const selectVerifiedLeads = () => {
+    setSelectedLeadIds(
+      leads
+        .filter((l) => l.email && l.email.includes('@') && !l.email.includes('(No public'))
+        .map((l) => l.id)
+    );
+  };
+
+  const clearSelection = () => {
+    setSelectedLeadIds([]);
+  };
+
   const [auditLogs, setAuditLogs] = useState<AuditEntry[]>([
     {
       id: 'init-1',
@@ -152,6 +179,7 @@ export const AgentDetail: React.FC<AgentDetailProps> = ({ agent, backendStatus }
       });
 
       setLeads(response.leads);
+      setSelectedLeadIds(response.leads.map((l) => l.id));
       setLastResponse(response);
 
       if (response.is_demo) {
@@ -287,7 +315,7 @@ export const AgentDetail: React.FC<AgentDetailProps> = ({ agent, backendStatus }
         </div>
         <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', background: 'var(--bg-secondary)', padding: '0.4rem 0.8rem', borderRadius: '8px', border: '1px solid var(--border-subtle)', whiteSpace: 'nowrap' }}>
           <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>Pending Drafts:</span>
-          <span style={{ fontSize: '0.85rem', fontWeight: 700, color: 'var(--accent-cyan)' }}>0</span>
+          <span style={{ fontSize: '0.85rem', fontWeight: 700, color: 'var(--accent-cyan)' }}>{pendingDraftsCount}</span>
         </div>
       </div>
 
@@ -543,6 +571,7 @@ export const AgentDetail: React.FC<AgentDetailProps> = ({ agent, backendStatus }
                   className="btn btn-secondary"
                   onClick={() => {
                     setLeads([]);
+                    setSelectedLeadIds([]);
                     setLastResponse(null);
                     setFormError(null);
                   }}
@@ -713,97 +742,185 @@ export const AgentDetail: React.FC<AgentDetailProps> = ({ agent, backendStatus }
               </div>
             ) : leads.length > 0 ? (
               /* Success / Results Table View */
-              <div className="lead-table-container">
-                <table className="lead-table">
-                  <thead>
-                    <tr>
-                      <th style={{ width: '22%' }}>Company & Domain</th>
-                      <th style={{ width: '20%' }}>Decision Maker & Email</th>
-                      <th style={{ width: '24%' }}>Public Business Summary</th>
-                      <th style={{ width: '18%' }}>Source Page URL</th>
-                      <th style={{ width: '16%' }}>Extraction Verification</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {leads.map((lead) => (
-                      <tr key={lead.id}>
-                        <td>
-                          <div className="lead-company">
-                            <BuildingIcon size={14} color={lead.is_live ? '#34d399' : 'var(--accent-cyan)'} />
-                            {lead.company_name}
-                          </div>
-                          <div style={{ fontSize: '0.7rem', color: 'var(--text-muted)', display: 'flex', alignItems: 'center', gap: '0.3rem', marginTop: '0.15rem' }}>
-                            <a
-                              href={lead.website}
-                              target="_blank"
-                              rel="noopener noreferrer"
-                              className="lead-link"
-                              onClick={(e) => {
-                                if (lead.website.includes('.test') || lead.website.includes('.example.com')) {
-                                  e.preventDefault();
-                                }
-                              }}
-                            >
-                              <span>{lead.website.replace(/^https?:\/\/(www\.)?/, '')}</span>
-                              <ExternalLinkIcon size={10} color="var(--accent-cyan)" />
-                            </a>
-                          </div>
-                        </td>
-                        <td>
-                          <div className="lead-contact">
-                            <UserIcon size={12} color="var(--text-secondary)" style={{ display: 'inline', marginRight: 4, verticalAlign: 'middle' }} />
-                            {lead.contact_name}
-                          </div>
-                          <div style={{ fontFamily: 'var(--font-mono)', fontSize: '0.72rem', color: lead.email.includes('@') ? '#38bdf8' : 'var(--text-muted)', marginTop: '0.15rem' }}>
-                            {lead.email}
-                          </div>
-                        </td>
-                        <td>
-                          <div style={{ fontSize: '0.73rem', color: 'var(--text-secondary)', lineHeight: 1.35, maxHeight: '3.6em', overflow: 'hidden' }}>
-                            {lead.description || lead.source_note}
-                          </div>
-                        </td>
-                        <td>
-                          {lead.source_url && lead.source_url.startsWith('http') ? (
-                            <a
-                              href={lead.source_url}
-                              target="_blank"
-                              rel="noopener noreferrer"
-                              className="lead-link"
-                              style={{ fontSize: '0.72rem', fontFamily: 'var(--font-mono)' }}
-                              onClick={(e) => {
-                                if (lead.source_url?.includes('.test')) e.preventDefault();
-                              }}
-                            >
-                              <span>{lead.source_url.replace(/^https?:\/\//, '').slice(0, 24)}...</span>
-                              <ExternalLinkIcon size={11} color="var(--accent-cyan)" />
-                            </a>
-                          ) : (
-                            <span style={{ fontSize: '0.7rem', color: 'var(--text-muted)', fontFamily: 'var(--font-mono)' }}>
-                              {lead.source_url || 'simulated://mock'}
-                            </span>
-                          )}
-                        </td>
-                        <td>
-                          <div style={{ display: 'flex', flexDirection: 'column', gap: '0.25rem' }}>
-                            <span className={lead.is_live ? 'badge badge-active' : 'badge badge-cyan'} style={{ fontSize: '0.62rem', alignSelf: 'flex-start' }}>
-                              {lead.is_live ? 'Live Public Web' : 'Simulated Sample'}
-                            </span>
-                            {lead.verified_fields && lead.verified_fields.length > 0 && (
-                              <div style={{ display: 'flex', gap: '0.2rem', flexWrap: 'wrap' }}>
-                                {lead.verified_fields.slice(0, 3).map((vf, idx) => (
-                                  <span key={idx} className="tag-verified">
-                                    {vf}
-                                  </span>
-                                ))}
-                              </div>
-                            )}
-                          </div>
-                        </td>
+              <div>
+                {/* Lead Selection & Outreach Action Bar */}
+                <div
+                  style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'space-between',
+                    flexWrap: 'wrap',
+                    gap: '0.75rem',
+                    marginBottom: '0.75rem',
+                    padding: '0.45rem 0.8rem',
+                    background: 'rgba(15, 23, 42, 0.65)',
+                    borderRadius: '8px',
+                    border: '1px solid var(--border-subtle)',
+                    fontSize: '0.75rem',
+                  }}
+                >
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '0.6rem', flexWrap: 'wrap' }}>
+                    <span style={{ color: 'var(--text-muted)' }}>Lead Selection:</span>
+                    <span style={{ fontWeight: 700, color: selectedLeadIds.length > 0 ? 'var(--accent-cyan)' : 'var(--text-muted)' }}>
+                      {selectedLeadIds.length} of {leads.length} selected
+                    </span>
+                    <span style={{ color: 'var(--border-subtle)' }}>|</span>
+                    <button
+                      type="button"
+                      onClick={selectAllLeads}
+                      style={{ background: 'none', border: 'none', color: 'var(--accent-cyan)', cursor: 'pointer', fontSize: '0.72rem', textDecoration: 'underline' }}
+                    >
+                      Select All
+                    </button>
+                    <span style={{ color: 'var(--border-subtle)' }}>&bull;</span>
+                    <button
+                      type="button"
+                      onClick={selectVerifiedLeads}
+                      style={{ background: 'none', border: 'none', color: '#34d399', cursor: 'pointer', fontSize: '0.72rem', textDecoration: 'underline' }}
+                    >
+                      Select Verified Only
+                    </button>
+                    {selectedLeadIds.length > 0 && (
+                      <>
+                        <span style={{ color: 'var(--border-subtle)' }}>&bull;</span>
+                        <button
+                          type="button"
+                          onClick={clearSelection}
+                          style={{ background: 'none', border: 'none', color: 'var(--text-muted)', cursor: 'pointer', fontSize: '0.72rem', textDecoration: 'underline' }}
+                        >
+                          Clear
+                        </button>
+                      </>
+                    )}
+                  </div>
+
+                  <a
+                    href="#outreach-console"
+                    className="btn btn-secondary"
+                    style={{ fontSize: '0.72rem', padding: '0.3rem 0.65rem', textDecoration: 'none' }}
+                  >
+                    <MailIcon size={12} color="var(--accent-cyan)" />
+                    Draft Outreach ({selectedLeadIds.length})
+                  </a>
+                </div>
+
+                <div className="lead-table-container">
+                  <table className="lead-table">
+                    <thead>
+                      <tr>
+                        <th style={{ width: '4%', textAlign: 'center' }}>
+                          <input
+                            type="checkbox"
+                            checked={leads.length > 0 && selectedLeadIds.length === leads.length}
+                            onChange={(e) => {
+                              if (e.target.checked) selectAllLeads();
+                              else clearSelection();
+                            }}
+                            title="Select / deselect all leads"
+                          />
+                        </th>
+                        <th style={{ width: '22%' }}>Company & Domain</th>
+                        <th style={{ width: '20%' }}>Decision Maker & Email</th>
+                        <th style={{ width: '22%' }}>Public Business Summary</th>
+                        <th style={{ width: '17%' }}>Source Page URL</th>
+                        <th style={{ width: '15%' }}>Extraction Verification</th>
                       </tr>
-                    ))}
-                  </tbody>
-                </table>
+                    </thead>
+                    <tbody>
+                      {leads.map((lead) => (
+                        <tr
+                          key={lead.id}
+                          style={{
+                            background: selectedLeadIds.includes(lead.id)
+                              ? 'rgba(6, 182, 212, 0.05)'
+                              : undefined,
+                          }}
+                        >
+                          <td style={{ textAlign: 'center' }}>
+                            <input
+                              type="checkbox"
+                              checked={selectedLeadIds.includes(lead.id)}
+                              onChange={() => toggleSelectLead(lead.id)}
+                            />
+                          </td>
+                          <td>
+                            <div className="lead-company">
+                              <BuildingIcon size={14} color={lead.is_live ? '#34d399' : 'var(--accent-cyan)'} />
+                              {lead.company_name}
+                            </div>
+                            <div style={{ fontSize: '0.7rem', color: 'var(--text-muted)', display: 'flex', alignItems: 'center', gap: '0.3rem', marginTop: '0.15rem' }}>
+                              <a
+                                href={lead.website}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                className="lead-link"
+                                onClick={(e) => {
+                                  if (lead.website.includes('.test') || lead.website.includes('.example.com')) {
+                                    e.preventDefault();
+                                  }
+                                }}
+                              >
+                                <span>{lead.website.replace(/^https?:\/\/(www\.)?/, '')}</span>
+                                <ExternalLinkIcon size={10} color="var(--accent-cyan)" />
+                              </a>
+                            </div>
+                          </td>
+                          <td>
+                            <div className="lead-contact">
+                              <UserIcon size={12} color="var(--text-secondary)" style={{ display: 'inline', marginRight: 4, verticalAlign: 'middle' }} />
+                              {lead.contact_name}
+                            </div>
+                            <div style={{ fontFamily: 'var(--font-mono)', fontSize: '0.72rem', color: lead.email.includes('@') ? '#38bdf8' : 'var(--text-muted)', marginTop: '0.15rem' }}>
+                              {lead.email}
+                            </div>
+                          </td>
+                          <td>
+                            <div style={{ fontSize: '0.73rem', color: 'var(--text-secondary)', lineHeight: 1.35, maxHeight: '3.6em', overflow: 'hidden' }}>
+                              {lead.description || lead.source_note}
+                            </div>
+                          </td>
+                          <td>
+                            {lead.source_url && lead.source_url.startsWith('http') ? (
+                              <a
+                                href={lead.source_url}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                className="lead-link"
+                                style={{ fontSize: '0.72rem', fontFamily: 'var(--font-mono)' }}
+                                onClick={(e) => {
+                                  if (lead.source_url?.includes('.test')) e.preventDefault();
+                                }}
+                              >
+                                <span>{lead.source_url.replace(/^https?:\/\//, '').slice(0, 24)}...</span>
+                                <ExternalLinkIcon size={11} color="var(--accent-cyan)" />
+                              </a>
+                            ) : (
+                              <span style={{ fontSize: '0.7rem', color: 'var(--text-muted)', fontFamily: 'var(--font-mono)' }}>
+                                {lead.source_url || 'simulated://mock'}
+                              </span>
+                            )}
+                          </td>
+                          <td>
+                            <div style={{ display: 'flex', flexDirection: 'column', gap: '0.25rem' }}>
+                              <span className={lead.is_live ? 'badge badge-active' : 'badge badge-cyan'} style={{ fontSize: '0.62rem', alignSelf: 'flex-start' }}>
+                                {lead.is_live ? 'Live Public Web' : 'Simulated Sample'}
+                              </span>
+                              {lead.verified_fields && lead.verified_fields.length > 0 && (
+                                <div style={{ display: 'flex', gap: '0.2rem', flexWrap: 'wrap' }}>
+                                  {lead.verified_fields.slice(0, 3).map((vf, idx) => (
+                                    <span key={idx} className="tag-verified">
+                                      {vf}
+                                    </span>
+                                  ))}
+                                </div>
+                              )}
+                            </div>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
               </div>
             ) : (
               /* Initial Welcome / Ready View */
@@ -874,6 +991,21 @@ export const AgentDetail: React.FC<AgentDetailProps> = ({ agent, backendStatus }
               </div>
             )}
           </div>
+        </div>
+      )}
+
+      {/* AI Outreach Drafting Console */}
+      {isAgentOne && (
+        <div id="outreach-console">
+          <OutreachConsole
+            selectedLeads={leads.filter((l) => selectedLeadIds.includes(l.id))}
+            allLeadsCount={leads.length}
+            onSelectAll={selectAllLeads}
+            onSelectVerified={selectVerifiedLeads}
+            onLogAudit={addAuditLog}
+            onDraftCountChange={setPendingDraftsCount}
+            backendStatus={backendStatus}
+          />
         </div>
       )}
 

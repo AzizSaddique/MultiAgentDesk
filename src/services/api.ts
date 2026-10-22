@@ -1,4 +1,13 @@
-import { LeadRecord, ResearchRequest, ResearchResponse } from '../types/agent';
+import {
+  LeadRecord,
+  ResearchRequest,
+  ResearchResponse,
+  OutreachDraftRequest,
+  OutreachDraftResponse,
+  SendOutreachRequest,
+  SendOutreachResponse,
+  ProvidersResponse,
+} from '../types/agent';
 
 export interface HealthResponse {
   status: string;
@@ -154,3 +163,122 @@ export async function downloadLeadsCsv(leads: LeadRecord[]): Promise<void> {
   document.body.removeChild(link);
   URL.revokeObjectURL(url);
 }
+
+/**
+ * Fetch available AI drafting providers and configuration options.
+ */
+export async function fetchAIProviders(): Promise<ProvidersResponse> {
+  try {
+    const response = await fetch(`${BACKEND_BASE_URL}/api/outreach/providers`, {
+      method: 'GET',
+      headers: {
+        'Accept': 'application/json',
+      },
+    });
+    if (!response.ok) {
+      throw new Error(`Failed to fetch AI providers (${response.status})`);
+    }
+    return await response.json();
+  } catch (err) {
+    // Fallback to built-in provider if offline
+    return {
+      providers: [
+        {
+          id: 'template',
+          name: 'Built-in Grounded Drafter',
+          description: 'Deterministic, zero-leakage drafter using strictly verified public metadata. Fast & offline-ready.',
+          requires_key: false,
+          is_available: true,
+        },
+      ],
+      dispatch: {
+        mode: 'simulation',
+        is_live: false,
+        display_name: 'Simulation Mode (Safe Offline)',
+        from_email: 'simulation@agentdesk.local',
+        is_configured: true,
+        notice: 'Simulation mode: No real emails are delivered.',
+      },
+    };
+  }
+}
+
+/**
+ * Request AI-powered personalized outreach drafting for selected leads.
+ */
+export async function draftOutreach(
+  request: OutreachDraftRequest,
+  timeoutMs: number = 30000
+): Promise<OutreachDraftResponse> {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+
+  try {
+    const response = await fetch(`${BACKEND_BASE_URL}/api/outreach/draft`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Accept': 'application/json',
+      },
+      body: JSON.stringify(request),
+      signal: controller.signal,
+    });
+
+    if (!response.ok) {
+      let errorDetail = `Outreach drafting error (${response.status})`;
+      try {
+        const errorJson = await response.json();
+        if (errorJson.detail) {
+          errorDetail = typeof errorJson.detail === 'string'
+            ? errorJson.detail
+            : JSON.stringify(errorJson.detail);
+        }
+      } catch {
+        // Fallback to status text
+      }
+      throw new Error(errorDetail);
+    }
+
+    return await response.json();
+  } catch (err: unknown) {
+    if (err instanceof DOMException && err.name === 'AbortError') {
+      throw new Error('Outreach drafting request timed out after 30 seconds.');
+    }
+    throw err;
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
+/**
+ * Dispatches outreach email through the human approval safety gate.
+ * Requires approved === true and a genuine verified recipient email.
+ */
+export async function sendOutreach(request: SendOutreachRequest): Promise<SendOutreachResponse> {
+  const response = await fetch(`${BACKEND_BASE_URL}/api/outreach/send`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Accept': 'application/json',
+    },
+    body: JSON.stringify(request),
+  });
+
+  if (!response.ok) {
+    let errorDetail = `Outreach dispatch failed (${response.status})`;
+    try {
+      const errorJson = await response.json();
+      if (errorJson.detail) {
+        errorDetail = typeof errorJson.detail === 'string'
+          ? errorJson.detail
+          : JSON.stringify(errorJson.detail);
+      }
+    } catch {
+      // Fallback
+    }
+    throw new Error(errorDetail);
+  }
+
+  return await response.json();
+}
+

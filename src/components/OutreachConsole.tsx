@@ -259,6 +259,9 @@ export const OutreachConsole: React.FC<OutreachConsoleProps> = ({
       });
 
       const isSim = response.is_simulated ?? true;
+      if (!response || response.status === 'failed') {
+        throw new Error(response?.message || 'Outreach dispatch was rejected by the provider.');
+      }
       // Update draft status to sent and note simulation vs live
       setDrafts((prev) =>
         prev.map((d) =>

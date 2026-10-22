@@ -7,4 +7,26 @@ Write-Host "   Binding to: http://127.0.0.1:8000" -ForegroundColor DarkCyan
 Write-Host "   Health Endpoint: http://127.0.0.1:8000/health" -ForegroundColor DarkCyan
 Write-Host "=============================================" -ForegroundColor Cyan
 
+# Load root .env into process environment if present
+$envFile = Join-Path (Split-Path $PSScriptRoot -Parent) ".env"
+if (Test-Path $envFile) {
+    Write-Host "   Loading configuration from root .env..." -ForegroundColor DarkCyan
+    Get-Content $envFile | ForEach-Object {
+        $line = $_.Trim()
+        if ($line -and -not $line.StartsWith("#") -and $line.Contains("=")) {
+            $parts = $line -split "=", 2
+            $key = $parts[0].Trim()
+            $val = $parts[1].Trim()
+            if (($val.StartsWith('"') -and $val.EndsWith('"')) -or ($val.StartsWith("'") -and $val.EndsWith("'"))) {
+                $val = $val.Substring(1, $val.Length - 2)
+            } elseif ($val.Contains(" #")) {
+                $val = ($val -split " #", 2)[0].Trim()
+            }
+            if ($key) {
+                [System.Environment]::SetEnvironmentVariable($key, $val, [System.EnvironmentVariableTarget]::Process)
+            }
+        }
+    }
+}
+
 python -m uvicorn main:app --host 127.0.0.1 --port 8000 --reload --loop none

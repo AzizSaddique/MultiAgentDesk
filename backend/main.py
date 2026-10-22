@@ -1,5 +1,7 @@
 import sys
 import os
+import json
+import sqlite3
 import asyncio
 from datetime import datetime, timezone
 import uvicorn
@@ -53,6 +55,54 @@ load_root_env(override=False)
 
 # In-memory registry of active generated drafts for strict verification tracking
 DRAFT_REGISTRY = {}
+
+def _init_draft_storage():
+    """Restores previously drafted records and their verification statuses across restarts."""
+    try:
+        backend_dir = os.path.dirname(os.path.abspath(__file__))
+        storage_dir = os.path.normpath(os.path.join(backend_dir, "..", "storage"))
+        if not os.path.isdir(storage_dir):
+            os.makedirs(storage_dir, exist_ok=True)
+        db_path = os.path.join(storage_dir, "dispatches.db")
+        with sqlite3.connect(db_path, timeout=5.0) as conn:
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS draft_records (
+                    id TEXT PRIMARY KEY,
+                    raw_json TEXT NOT NULL
+                )
+            """)
+            conn.commit()
+            cur = conn.execute("SELECT id, raw_json FROM draft_records")
+            for row in cur.fetchall():
+                try:
+                    d_data = json.loads(row[1])
+                    try:
+                        from .models import OutreachDraft
+                    except (ImportError, ValueError):
+                        from models import OutreachDraft
+                    DRAFT_REGISTRY[row[0]] = OutreachDraft.model_validate(d_data)
+                except Exception:
+                    pass
+    except Exception:
+        pass
+
+def _persist_draft(draft):
+    """Persists an OutreachDraft to SQLite for verification status durability across restarts."""
+    try:
+        backend_dir = os.path.dirname(os.path.abspath(__file__))
+        storage_dir = os.path.normpath(os.path.join(backend_dir, "..", "storage"))
+        db_path = os.path.join(storage_dir, "dispatches.db")
+        with sqlite3.connect(db_path, timeout=5.0) as conn:
+            conn.execute(
+                "INSERT OR REPLACE INTO draft_records (id, raw_json) VALUES (?, ?)",
+                (draft.id, draft.model_dump_json())
+            )
+            conn.commit()
+    except Exception:
+        pass
+
+# Initialize draft storage on startup
+_init_draft_storage()
 
 
 app = FastAPI(
@@ -234,6 +284,7 @@ async def draft_outreach(request: OutreachDraftRequest):
             )
             drafts.append(draft)
             DRAFT_REGISTRY[draft.id] = draft
+            _persist_draft(draft)
             if draft.has_verified_email:
                 verified_count += 1
             else:
@@ -277,72 +328,97 @@ async def send_outreach(request: SendOutreachRequest):
             detail="Subject and email body must not be empty."
         )
 
-    # 1. Duplicate-send protection (Draft ID & Content idempotency)
-    duplicate = global_dispatch_tracker.check_duplicate(
+    # 1. Duplicate-send protection & concurrent in-flight claim
+    allowed, reason, duplicate = global_dispatch_tracker.claim_dispatch(
         draft_id=request.draft_id,
         recipient_email=recipient,
         subject=subject_clean,
         body=body_clean,
     )
-    if duplicate:
-        raise HTTPException(
-            status_code=409,
-            detail=(
-                f"Duplicate Send Blocked: Outreach draft '{request.draft_id}' has already been dispatched "
-                f"to {duplicate.recipient_email} at {duplicate.dispatched_at} (Provider: {duplicate.provider}). "
-                "Repeated transmission is restricted to prevent duplicate emails."
+    if not allowed:
+        if reason == "in_flight":
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"Duplicate Send Blocked: Outreach draft '{request.draft_id}' is currently in-flight. "
+                    "A transmission request is already being processed for this message."
+                )
             )
-        )
+        else:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"Duplicate Send Blocked: Outreach draft '{request.draft_id}' has already been dispatched "
+                    f"to {duplicate.recipient_email} at {duplicate.dispatched_at} (Provider: {duplicate.provider}). "
+                    "Repeated transmission is restricted to prevent duplicate emails."
+                )
+            )
 
-    # 2. Strict public email verification check
-    if not recipient or recipient == "(No public email listed)" or "@" not in recipient or "." not in recipient.split("@")[-1]:
-        raise HTTPException(
-            status_code=422,
-            detail="Dispatch Blocked: Target lead lacks a verified public email address. Transmission to unverified leads is restricted."
-        )
+    try:
+        # 2. Strict public email verification check
+        if not recipient or recipient == "(No public email listed)" or "@" not in recipient or "." not in recipient.split("@")[-1]:
+            raise HTTPException(
+                status_code=422,
+                detail="Dispatch Blocked: Target lead lacks a verified public email address. Transmission to unverified leads is restricted."
+            )
 
-    # If the draft was recorded in DRAFT_REGISTRY, its verified status is authoritative:
-    if request.draft_id in DRAFT_REGISTRY:
-        reg_draft = DRAFT_REGISTRY[request.draft_id]
-        if not reg_draft.has_verified_email:
+        # If the draft was recorded in DRAFT_REGISTRY, its verified status is authoritative:
+        if request.draft_id in DRAFT_REGISTRY:
+            reg_draft = DRAFT_REGISTRY[request.draft_id]
+            if not reg_draft.has_verified_email:
+                raise HTTPException(
+                    status_code=422,
+                    detail="Dispatch Blocked: Target lead lacks a verified public email address. A syntactically valid email alone does not count as verified."
+                )
+            if reg_draft.recipient_email.lower() != recipient.lower():
+                raise HTTPException(
+                    status_code=422,
+                    detail="Dispatch Blocked: Recipient address does not match the verified public email recorded for this draft."
+                )
+        elif request.has_verified_email is False:
             raise HTTPException(
                 status_code=422,
                 detail="Dispatch Blocked: Target lead lacks a verified public email address. A syntactically valid email alone does not count as verified."
             )
-        if reg_draft.recipient_email.lower() != recipient.lower():
-            raise HTTPException(
-                status_code=422,
-                detail="Dispatch Blocked: Recipient address does not match the verified public email recorded for this draft."
-            )
-    elif request.has_verified_email is False:
-        raise HTTPException(
-            status_code=422,
-            detail="Dispatch Blocked: Target lead lacks a verified public email address. A syntactically valid email alone does not count as verified."
-        )
 
-    try:
-        result = dispatch_outreach_email(
+        try:
+            result = dispatch_outreach_email(
+                recipient_email=recipient,
+                subject=subject_clean,
+                body=body_clean,
+                draft_id=request.draft_id,
+            )
+        except DispatchConfigurationError as exc:
+            raise HTTPException(status_code=500, detail=str(exc))
+        except DispatchDeliveryError as exc:
+            raise HTTPException(status_code=502, detail=str(exc))
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=f"Unexpected dispatch error: {str(exc)}")
+
+        if not getattr(result, "success", True):
+            raise HTTPException(
+                status_code=502,
+                detail=getattr(result, "message", "Dispatch provider rejected transmission.")
+            )
+
+        # Record dispatch in idempotency registry only on success
+        global_dispatch_tracker.record_dispatch(
+            draft_id=request.draft_id,
             recipient_email=recipient,
             subject=subject_clean,
             body=body_clean,
-            draft_id=request.draft_id,
+            status=result.status,
+            provider=result.provider,
         )
-    except DispatchConfigurationError as exc:
-        raise HTTPException(status_code=500, detail=str(exc))
-    except DispatchDeliveryError as exc:
-        raise HTTPException(status_code=502, detail=str(exc))
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"Unexpected dispatch error: {str(exc)}")
-
-    # Record dispatch in idempotency registry only on success
-    global_dispatch_tracker.record_dispatch(
-        draft_id=request.draft_id,
-        recipient_email=recipient,
-        subject=subject_clean,
-        body=body_clean,
-        status=result.status,
-        provider=result.provider,
-    )
+    except Exception:
+        # On failure or validation exception, release the in-flight claim so retry is possible
+        global_dispatch_tracker.release_claim(
+            draft_id=request.draft_id,
+            recipient_email=recipient,
+            subject=subject_clean,
+            body=body_clean,
+        )
+        raise
 
     now_iso = datetime.now(timezone.utc).isoformat()
     return SendOutreachResponse(

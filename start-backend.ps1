@@ -16,7 +16,13 @@ if (Test-Path $envFile) {
         if ($line -and -not $line.StartsWith("#") -and $line.Contains("=")) {
             $parts = $line -split "=", 2
             $key = $parts[0].Trim()
-            $val = $parts[1].Trim().Trim('"').Trim("'")
+            $val = $parts[1].Trim()
+            # If quoted, strip matching quotes; if unquoted, strip trailing comment
+            if (($val.StartsWith('"') -and $val.EndsWith('"')) -or ($val.StartsWith("'") -and $val.EndsWith("'"))) {
+                $val = $val.Substring(1, $val.Length - 2)
+            } elseif ($val.Contains(" #")) {
+                $val = ($val -split " #", 2)[0].Trim()
+            }
             if ($key) {
                 [System.Environment]::SetEnvironmentVariable($key, $val, [System.EnvironmentVariableTarget]::Process)
             }

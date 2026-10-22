@@ -6,6 +6,12 @@ dist-ssr/
 .env
 .env.*
 !.env.example
+*.pem
+*.key
+*.cert
+*.pfx
+credentials.json
+client_secrets.json
 
 # Tauri & Rust
 src-tauri/target/

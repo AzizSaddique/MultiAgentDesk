@@ -4,7 +4,9 @@ Loads key-value pairs from the repository root .env file into os.environ
 without requiring external third-party packages (e.g. python-dotenv).
 """
 import os
-from typing import Dict, Optional
+from typing import Dict, Optional, Set
+
+_LOADED_AGENTDESK_KEYS: Set[str] = set()
 
 def find_root_env_path() -> Optional[str]:
     """
@@ -60,14 +62,29 @@ def load_root_env(override: bool = False) -> Dict[str, str]:
     """
     Loads root .env variables into os.environ.
     If override is False, existing os.environ entries are preserved.
+    If override is True, updates os.environ with newly parsed values and cleans up
+    any AGENTDESK_ keys that were removed from the file.
     Returns the dictionary of loaded variables.
     """
+    global _LOADED_AGENTDESK_KEYS
     env_path = find_root_env_path()
     if not env_path:
+        if override:
+            for k in list(_LOADED_AGENTDESK_KEYS):
+                os.environ.pop(k, None)
+            _LOADED_AGENTDESK_KEYS.clear()
         return {}
 
     parsed = parse_env_file(env_path)
+    if override:
+        for k in list(_LOADED_AGENTDESK_KEYS):
+            if k not in parsed:
+                os.environ.pop(k, None)
+                _LOADED_AGENTDESK_KEYS.discard(k)
+
     for k, v in parsed.items():
         if override or k not in os.environ:
             os.environ[k] = v
+        if k.startswith("AGENTDESK_"):
+            _LOADED_AGENTDESK_KEYS.add(k)
     return parsed

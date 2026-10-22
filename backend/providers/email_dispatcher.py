@@ -79,8 +79,8 @@ def get_dispatch_config() -> Dict[str, Any]:
     Retrieves current email dispatch configuration from environment variables.
     Defaults to 'simulation' mode when no outbound credentials are supplied.
     """
-    # Ensure any newly created or modified root .env is loaded
-    load_root_env(override=False)
+    # Ensure any newly created or modified root .env is loaded dynamically
+    load_root_env(override=True)
 
     raw_mode = os.environ.get("AGENTDESK_OUTREACH_DISPATCH_MODE", "").strip().lower()
 

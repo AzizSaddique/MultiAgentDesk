@@ -612,4 +612,117 @@ def test_verified_draft_blocks_recipient_tampering():
     assert legit_res.status_code == 200
     assert legit_res.json()["status"] == "simulated"
 
+def test_in_flight_concurrent_duplicate_send_is_blocked():
+    """Verify concurrent / in-flight duplicate requests are blocked with 409 Conflict."""
+    from backend.dispatch_tracker import global_dispatch_tracker
+    global_dispatch_tracker.clear()
+
+    payload = {
+        "draft_id": "draft-concurrent-test",
+        "approved": True,
+        "recipient_email": "concurrent@enterprise.test",
+        "subject": "Concurrent Test",
+        "body": "Body for concurrent test.",
+    }
+
+    # Simulate an active in-flight request claiming the lock
+    allowed, reason, dup = global_dispatch_tracker.claim_dispatch(
+        draft_id=payload["draft_id"],
+        recipient_email=payload["recipient_email"],
+        subject=payload["subject"],
+        body=payload["body"],
+    )
+    assert allowed is True
+    assert global_dispatch_tracker.is_in_flight(payload["draft_id"])
+
+    # A concurrent request arriving while the first is in-flight MUST be blocked
+    res = client.post("/api/outreach/send", json=payload)
+    assert res.status_code == 409
+    assert "currently in-flight" in res.json()["detail"]
+
+    # Release the simulated claim
+    global_dispatch_tracker.release_claim(
+        draft_id=payload["draft_id"],
+        recipient_email=payload["recipient_email"],
+        subject=payload["subject"],
+        body=payload["body"],
+    )
+    assert not global_dispatch_tracker.is_in_flight(payload["draft_id"])
+
+def test_dispatch_claim_released_on_delivery_failure():
+    """Verify that when a delivery error occurs, the in-flight claim is released so the user can retry."""
+    from backend.dispatch_tracker import global_dispatch_tracker
+    global_dispatch_tracker.clear()
+
+    payload = {
+        "draft_id": "draft-fail-release-test",
+        "approved": True,
+        "recipient_email": "target@failover.test",
+        "subject": "Failover Test",
+        "body": "Body content for failover test.",
+    }
+
+    with patch("backend.main.dispatch_outreach_email") as mock_dispatch:
+        from backend.providers.email_dispatcher import DispatchDeliveryError
+        mock_dispatch.side_effect = DispatchDeliveryError("Simulated provider outage")
+
+        res = client.post("/api/outreach/send", json=payload)
+        assert res.status_code == 502
+        assert "Simulated provider outage" in res.json()["detail"]
+
+    # In-flight lock must be cleanly released
+    assert not global_dispatch_tracker.is_in_flight(payload["draft_id"])
+    assert not global_dispatch_tracker.is_dispatched(payload["draft_id"])
+
+def test_dispatch_tracker_sqlite_persistence_across_instances(tmp_path):
+    """Verify that dispatched records survive across restarts via SQLite."""
+    from backend.dispatch_tracker import DispatchTracker
+    test_db = str(tmp_path / "test_dispatches.db")
+
+    # Instance 1: record a dispatch
+    tracker1 = DispatchTracker(db_path=test_db)
+    tracker1.record_dispatch(
+        draft_id="draft-persist-1",
+        recipient_email="ceo@target.test",
+        subject="Important proposal",
+        body="Body text",
+        status="sent",
+        provider="smtp",
+    )
+    assert tracker1.is_dispatched("draft-persist-1")
+
+    # Instance 2 (simulating service restart): reads from the same DB
+    tracker2 = DispatchTracker(db_path=test_db)
+    assert tracker2.is_dispatched("draft-persist-1")
+
+    # Duplicate check on Instance 2 blocks duplicate
+    dup = tracker2.check_duplicate(
+        draft_id="draft-persist-1",
+        recipient_email="ceo@target.test",
+        subject="Important proposal",
+        body="Body text",
+    )
+    assert dup is not None
+    assert dup.draft_id == "draft-persist-1"
+
+def test_dynamic_env_reload_in_get_dispatch_config(tmp_path, monkeypatch):
+    """Verify that get_dispatch_config dynamically reloads configuration on invocation."""
+    from backend.providers.email_dispatcher import get_dispatch_status_info
+
+    # 1. Initially simulation mode
+    monkeypatch.setenv("AGENTDESK_OUTREACH_DISPATCH_MODE", "simulation")
+    monkeypatch.delenv("AGENTDESK_SMTP_HOST", raising=False)
+    info1 = get_dispatch_status_info()
+    assert info1["mode"] == "simulation"
+    assert info1["is_live"] is False
+
+    # 2. Update environment to SMTP
+    monkeypatch.setenv("AGENTDESK_OUTREACH_DISPATCH_MODE", "smtp")
+    monkeypatch.setenv("AGENTDESK_SMTP_HOST", "mail.enterprise.test")
+    monkeypatch.setenv("AGENTDESK_SMTP_FROM_EMAIL", "outreach@enterprise.test")
+    info2 = get_dispatch_status_info()
+    assert info2["mode"] == "smtp"
+    assert info2["is_live"] is True
+    assert "mail.enterprise.test" in info2["display_name"]
+
 

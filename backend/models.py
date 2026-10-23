@@ -2,8 +2,8 @@
 Data models for AgentDesk Research and Lead Management.
 Supports both Mock / Demo mode and Live Playwright Public-Web extraction.
 """
-from pydantic import BaseModel, Field
-from typing import List, Optional
+from pydantic import BaseModel, Field, model_validator
+from typing import List, Optional, Any
 
 class ResearchRequest(BaseModel):
     topic: str = Field(..., min_length=2, max_length=100, description="Target search topic or niche keyword")
@@ -106,4 +106,54 @@ class SendOutreachResponse(BaseModel):
     is_simulated: Optional[bool] = False
     provider: Optional[str] = "simulation"
 
+class OutreachHistoryItem(BaseModel):
+    id: str
+    draft_id: str
+    recipient_email: str
+    recipient_name: Optional[str] = ""
+    company_name: Optional[str] = ""
+    subject: str
+    body_preview: Optional[str] = ""
+    body_snippet: Optional[str] = ""
+    source_url: Optional[str] = ""
+    status: str = Field(..., description="Dispatch status: 'simulated', 'sent', 'failed', 'drafted'")
+    provider: str = Field(default="simulation", description="Provider mode (e.g. simulation, smtp, resend)")
+    provider_mode: Optional[str] = Field(default=None, description="Alias for provider mode")
+    is_simulated: bool = Field(default=False, description="True if safe offline simulation mode was used")
+    dispatched_at: str = Field(..., description="UTC ISO 8601 timestamp of dispatch or draft")
+    error_message: Optional[str] = Field(default=None, description="Sanitized failure diagnostic message")
+
+    @model_validator(mode="before")
+    @classmethod
+    def populate_aliases(cls, data: Any):
+        if isinstance(data, dict):
+            # Sync provider and provider_mode
+            if "provider" in data and not data.get("provider_mode"):
+                data["provider_mode"] = data["provider"]
+            elif "provider_mode" in data and not data.get("provider"):
+                data["provider"] = data["provider_mode"]
+            # Sync body_preview and body_snippet
+            if "body_preview" in data and not data.get("body_snippet"):
+                data["body_snippet"] = data["body_preview"]
+            elif "body_snippet" in data and not data.get("body_preview"):
+                data["body_preview"] = data["body_snippet"]
+        return data
+
+class OutreachHistoryResponse(BaseModel):
+    items: List[OutreachHistoryItem]
+    total: int
+    page: int
+    page_size: int
+    total_pages: int
+    status_counts: dict = Field(default_factory=dict)
+    counts_by_status: dict = Field(default_factory=dict)
+
+    @model_validator(mode="before")
+    @classmethod
+    def sync_counts(cls, data: Any):
+        if isinstance(data, dict):
+            counts = data.get("status_counts") or data.get("counts_by_status") or {}
+            data["status_counts"] = counts
+            data["counts_by_status"] = counts
+        return data
 

@@ -24,6 +24,7 @@ import { OutreachConsole } from './OutreachConsole';
 interface AgentDetailProps {
   agent: AgentModel;
   backendStatus?: BackendStatus;
+  onNavigateToHistory?: () => void;
 }
 
 interface AuditEntry {
@@ -46,7 +47,7 @@ const LIVE_SAMPLE_URLS = [
   { label: 'Wikipedia Foundation', url: 'https://www.wikipedia.org' },
 ];
 
-export const AgentDetail: React.FC<AgentDetailProps> = ({ agent, backendStatus }) => {
+export const AgentDetail: React.FC<AgentDetailProps> = ({ agent, backendStatus, onNavigateToHistory }) => {
   // Mode Selection: 'demo' (mock provider) vs 'live' (Playwright scraper)
   const [researchMode, setResearchMode] = useState<'demo' | 'live'>('demo');
 
@@ -1005,6 +1006,7 @@ export const AgentDetail: React.FC<AgentDetailProps> = ({ agent, backendStatus }
             onLogAudit={addAuditLog}
             onDraftCountChange={setPendingDraftsCount}
             backendStatus={backendStatus}
+            onNavigateToHistory={onNavigateToHistory}
           />
         </div>
       )}

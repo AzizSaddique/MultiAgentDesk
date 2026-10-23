@@ -155,4 +155,37 @@ export interface SendOutreachResponse {
   provider?: string;
 }
 
+export interface OutreachHistoryItem {
+  id: string;
+  draft_id?: string | null;
+  recipient_email: string;
+  recipient_name?: string | null;
+  company_name?: string | null;
+  subject: string;
+  body_snippet?: string | null;
+  source_url?: string | null;
+  status: 'simulated' | 'sent' | 'failed' | 'drafted' | string;
+  provider_mode?: string | null;
+  dispatched_at: string;
+  error_message?: string | null;
+  is_simulated: boolean;
+  delivery_metadata?: Record<string, any> | null;
+}
 
+export interface OutreachHistoryResponse {
+  items: OutreachHistoryItem[];
+  total: number;
+  page: number;
+  page_size: number;
+  total_pages: number;
+  status_counts: Record<string, number>;
+}
+
+export interface HistoryFilterParams {
+  status?: string;
+  query?: string;
+  start_date?: string;
+  end_date?: string;
+  page?: number;
+  page_size?: number;
+}

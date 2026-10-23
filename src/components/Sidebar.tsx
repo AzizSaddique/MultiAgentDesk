@@ -1,14 +1,14 @@
 import React from 'react';
 import { AgentModel } from '../types/agent';
-import { SearchIcon, LockIcon, PlusIcon, LayersIcon } from './icons';
+import { SearchIcon, LockIcon, PlusIcon, LayersIcon, HistoryIcon } from './icons';
 import { BackendStatus } from '../hooks/useBackendStatus';
 
 interface SidebarProps {
   agents: AgentModel[];
   selectedAgentId: string;
   onSelectAgent: (id: string) => void;
-  activeView: 'agent' | 'environment';
-  onSelectView: (view: 'agent' | 'environment') => void;
+  activeView: 'agent' | 'environment' | 'history';
+  onSelectView: (view: 'agent' | 'environment' | 'history') => void;
   backendStatus?: BackendStatus;
 }
 
@@ -104,6 +104,21 @@ export const Sidebar: React.FC<SidebarProps> = ({
 
       {/* Sidebar Footer */}
       <div className="sidebar-footer">
+        <button
+          className={`btn btn-secondary ${activeView === 'history' ? 'selected' : ''}`}
+          style={{
+            width: '100%',
+            justifyContent: 'flex-start',
+            padding: '0.65rem 0.85rem',
+            marginBottom: '0.5rem',
+            background: activeView === 'history' ? 'rgba(6, 182, 212, 0.15)' : undefined,
+            borderColor: activeView === 'history' ? 'var(--accent-cyan)' : undefined,
+          }}
+          onClick={() => onSelectView('history')}
+        >
+          <HistoryIcon size={16} color="var(--accent-cyan)" />
+          <span>Outreach History & Audit</span>
+        </button>
         <button
           className={`btn btn-secondary ${activeView === 'environment' ? 'selected' : ''}`}
           style={{ width: '100%', justifyContent: 'flex-start', padding: '0.65rem 0.85rem' }}

@@ -27,6 +27,7 @@ import {
   RefreshCwIcon,
   SettingsIcon,
   BuildingIcon,
+  HistoryIcon,
 } from './icons';
 
 interface OutreachConsoleProps {
@@ -37,6 +38,7 @@ interface OutreachConsoleProps {
   onLogAudit?: (type: 'success' | 'error' | 'info', message: string) => void;
   onDraftCountChange?: (count: number) => void;
   backendStatus?: BackendStatus;
+  onNavigateToHistory?: () => void;
 }
 
 export const OutreachConsole: React.FC<OutreachConsoleProps> = ({
@@ -47,6 +49,7 @@ export const OutreachConsole: React.FC<OutreachConsoleProps> = ({
   onLogAudit,
   onDraftCountChange,
   backendStatus,
+  onNavigateToHistory,
 }) => {
   // Provider Configuration State
   const [availableProviders, setAvailableProviders] = useState<AIProviderInfo[]>([]);
@@ -402,6 +405,19 @@ export const OutreachConsole: React.FC<OutreachConsoleProps> = ({
             <SettingsIcon size={13} color="var(--accent-cyan)" />
             AI Provider Settings
           </button>
+
+          {onNavigateToHistory && (
+            <button
+              type="button"
+              className="btn btn-secondary"
+              onClick={onNavigateToHistory}
+              style={{ fontSize: '0.75rem', padding: '0.35rem 0.7rem' }}
+              title="Open persistent Outreach History and dispatch audit"
+            >
+              <HistoryIcon size={13} color="var(--accent-cyan)" />
+              Outreach History
+            </button>
+          )}
         </div>
       </div>
 

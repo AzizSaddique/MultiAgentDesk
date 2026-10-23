@@ -7,6 +7,8 @@ import {
   SendOutreachRequest,
   SendOutreachResponse,
   ProvidersResponse,
+  OutreachHistoryResponse,
+  HistoryFilterParams,
 } from '../types/agent';
 
 export interface HealthResponse {
@@ -282,3 +284,94 @@ export async function sendOutreach(request: SendOutreachRequest): Promise<SendOu
   return await response.json();
 }
 
+/**
+ * Fetches outreach history with filtering, searching, and pagination.
+ */
+export async function fetchOutreachHistory(
+  params: HistoryFilterParams = {},
+  timeoutMs: number = 10000
+): Promise<OutreachHistoryResponse> {
+  const queryParts: string[] = [];
+  if (params.status) queryParts.push(`status=${encodeURIComponent(params.status)}`);
+  if (params.query) queryParts.push(`query=${encodeURIComponent(params.query)}`);
+  if (params.start_date) queryParts.push(`start_date=${encodeURIComponent(params.start_date)}`);
+  if (params.end_date) queryParts.push(`end_date=${encodeURIComponent(params.end_date)}`);
+  if (params.page !== undefined) queryParts.push(`page=${params.page}`);
+  if (params.page_size !== undefined) queryParts.push(`page_size=${params.page_size}`);
+
+  const queryString = queryParts.length > 0 ? `?${queryParts.join('&')}` : '';
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+
+  try {
+    const response = await fetch(`${BACKEND_BASE_URL}/api/outreach/history${queryString}`, {
+      method: 'GET',
+      headers: {
+        'Accept': 'application/json',
+      },
+      signal: controller.signal,
+    });
+
+    if (!response.ok) {
+      let detail = `Failed to fetch outreach history (${response.status})`;
+      try {
+        const errorJson = await response.json();
+        if (errorJson.detail) detail = String(errorJson.detail);
+      } catch {
+        // use fallback
+      }
+      throw new Error(detail);
+    }
+
+    return await response.json();
+  } catch (err: unknown) {
+    if (err instanceof DOMException && err.name === 'AbortError') {
+      throw new Error('History request timed out after 10 seconds.');
+    }
+    throw err;
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
+/**
+ * Downloads outreach history as CSV, passing any active search/filter parameters.
+ */
+export async function downloadHistoryCsv(params: HistoryFilterParams = {}): Promise<void> {
+  const queryParts: string[] = [];
+  if (params.status) queryParts.push(`status=${encodeURIComponent(params.status)}`);
+  if (params.query) queryParts.push(`query=${encodeURIComponent(params.query)}`);
+  if (params.start_date) queryParts.push(`start_date=${encodeURIComponent(params.start_date)}`);
+  if (params.end_date) queryParts.push(`end_date=${encodeURIComponent(params.end_date)}`);
+
+  const queryString = queryParts.length > 0 ? `?${queryParts.join('&')}` : '';
+
+  const response = await fetch(`${BACKEND_BASE_URL}/api/outreach/history/export-csv${queryString}`, {
+    method: 'GET',
+    headers: {
+      'Accept': 'text/csv',
+    },
+  });
+
+  if (!response.ok) {
+    let detail = `Failed to export history CSV (${response.status})`;
+    try {
+      const err = await response.json();
+      if (err.detail) detail = String(err.detail);
+    } catch {
+      // fallback
+    }
+    throw new Error(detail);
+  }
+
+  const csvContent = await response.text();
+  const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.href = url;
+  link.setAttribute('download', `outreach_history_${Date.now()}.csv`);
+  document.body.appendChild(link);
+  link.click();
+  document.body.removeChild(link);
+  URL.revokeObjectURL(url);
+}

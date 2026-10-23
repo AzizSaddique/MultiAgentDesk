@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 import uvicorn
 from fastapi import FastAPI, HTTPException, Response
 from fastapi.middleware.cors import CORSMiddleware
-from typing import List
+from typing import List, Optional, Dict
 
 # On Windows, configure default policy to ProactorEventLoop before loops are started
 if sys.platform == "win32":
@@ -22,13 +22,14 @@ try:
         ResearchRequest, ResearchResponse, CSVExportRequest,
         OutreachDraftRequest, OutreachDraftResponse,
         SendOutreachRequest, SendOutreachResponse, AIProviderConfig,
+        OutreachHistoryItem, OutreachHistoryResponse,
     )
     from .providers.mock import MockResearchProvider
     from .providers.playwright_scraper import PlaywrightResearchProvider
     from .providers.llm import get_llm_provider
     from .providers.email_dispatcher import (
-        dispatch_outreach_email, get_dispatch_status_info,
-        DispatchConfigurationError, DispatchDeliveryError
+        dispatch_outreach_email, get_dispatch_status_info, get_dispatch_config,
+        DispatchConfigurationError, DispatchDeliveryError, sanitize_log_message,
     )
     from .exporter import generate_leads_csv
     from .env_loader import load_root_env
@@ -38,13 +39,14 @@ except (ImportError, ValueError):
         ResearchRequest, ResearchResponse, CSVExportRequest,
         OutreachDraftRequest, OutreachDraftResponse,
         SendOutreachRequest, SendOutreachResponse, AIProviderConfig,
+        OutreachHistoryItem, OutreachHistoryResponse,
     )
     from providers.mock import MockResearchProvider
     from providers.playwright_scraper import PlaywrightResearchProvider
     from providers.llm import get_llm_provider
     from providers.email_dispatcher import (
-        dispatch_outreach_email, get_dispatch_status_info,
-        DispatchConfigurationError, DispatchDeliveryError
+        dispatch_outreach_email, get_dispatch_status_info, get_dispatch_config,
+        DispatchConfigurationError, DispatchDeliveryError, sanitize_log_message,
     )
     from exporter import generate_leads_csv
     from env_loader import load_root_env
@@ -285,6 +287,22 @@ async def draft_outreach(request: OutreachDraftRequest):
             drafts.append(draft)
             DRAFT_REGISTRY[draft.id] = draft
             _persist_draft(draft)
+
+            # Record draft creation in history
+            global_dispatch_tracker.record_history_entry(
+                draft_id=draft.id,
+                recipient_email=draft.recipient_email,
+                subject=draft.subject,
+                status="drafted",
+                provider=provider.display_name,
+                is_simulated=False,
+                recipient_name=draft.recipient_name,
+                company_name=draft.company_name,
+                body_preview=draft.body,
+                source_url=draft.source_url,
+                dispatched_at=draft.created_at,
+            )
+
             if draft.has_verified_email:
                 verified_count += 1
             else:
@@ -362,9 +380,9 @@ async def send_outreach(request: SendOutreachRequest):
                 detail="Dispatch Blocked: Target lead lacks a verified public email address. Transmission to unverified leads is restricted."
             )
 
+        reg_draft = DRAFT_REGISTRY.get(request.draft_id)
         # If the draft was recorded in DRAFT_REGISTRY, its verified status is authoritative:
-        if request.draft_id in DRAFT_REGISTRY:
-            reg_draft = DRAFT_REGISTRY[request.draft_id]
+        if reg_draft:
             if not reg_draft.has_verified_email:
                 raise HTTPException(
                     status_code=422,
@@ -381,6 +399,9 @@ async def send_outreach(request: SendOutreachRequest):
                 detail="Dispatch Blocked: Target lead lacks a verified public email address. A syntactically valid email alone does not count as verified."
             )
 
+        current_cfg = get_dispatch_config()
+        current_mode = current_cfg.get("mode", "simulation")
+
         try:
             result = dispatch_outreach_email(
                 recipient_email=recipient,
@@ -389,16 +410,81 @@ async def send_outreach(request: SendOutreachRequest):
                 draft_id=request.draft_id,
             )
         except DispatchConfigurationError as exc:
-            raise HTTPException(status_code=500, detail=str(exc))
+            now_err_iso = datetime.now(timezone.utc).isoformat()
+            clean_err = sanitize_log_message(str(exc))
+            global_dispatch_tracker.record_history_entry(
+                draft_id=request.draft_id,
+                recipient_email=recipient,
+                subject=subject_clean,
+                status="failed",
+                provider=current_mode,
+                is_simulated=False,
+                recipient_name=reg_draft.recipient_name if reg_draft else "",
+                company_name=reg_draft.company_name if reg_draft else "",
+                body_preview=body_clean,
+                source_url=reg_draft.source_url if reg_draft else "",
+                error_message=clean_err,
+                dispatched_at=now_err_iso,
+            )
+            raise HTTPException(status_code=500, detail=clean_err)
         except DispatchDeliveryError as exc:
-            raise HTTPException(status_code=502, detail=str(exc))
+            now_err_iso = datetime.now(timezone.utc).isoformat()
+            clean_err = sanitize_log_message(str(exc))
+            global_dispatch_tracker.record_history_entry(
+                draft_id=request.draft_id,
+                recipient_email=recipient,
+                subject=subject_clean,
+                status="failed",
+                provider=current_mode,
+                is_simulated=False,
+                recipient_name=reg_draft.recipient_name if reg_draft else "",
+                company_name=reg_draft.company_name if reg_draft else "",
+                body_preview=body_clean,
+                source_url=reg_draft.source_url if reg_draft else "",
+                error_message=clean_err,
+                dispatched_at=now_err_iso,
+            )
+            raise HTTPException(status_code=502, detail=clean_err)
         except Exception as exc:
-            raise HTTPException(status_code=500, detail=f"Unexpected dispatch error: {str(exc)}")
+            now_err_iso = datetime.now(timezone.utc).isoformat()
+            clean_err = sanitize_log_message(str(exc))
+            global_dispatch_tracker.record_history_entry(
+                draft_id=request.draft_id,
+                recipient_email=recipient,
+                subject=subject_clean,
+                status="failed",
+                provider=current_mode,
+                is_simulated=False,
+                recipient_name=reg_draft.recipient_name if reg_draft else "",
+                company_name=reg_draft.company_name if reg_draft else "",
+                body_preview=body_clean,
+                source_url=reg_draft.source_url if reg_draft else "",
+                error_message=f"Unexpected dispatch error: {clean_err}",
+                dispatched_at=now_err_iso,
+            )
+            raise HTTPException(status_code=500, detail=f"Unexpected dispatch error: {clean_err}")
 
         if not getattr(result, "success", True):
+            now_err_iso = datetime.now(timezone.utc).isoformat()
+            fail_msg = getattr(result, "message", "Dispatch provider rejected transmission.")
+            clean_err = sanitize_log_message(fail_msg)
+            global_dispatch_tracker.record_history_entry(
+                draft_id=request.draft_id,
+                recipient_email=recipient,
+                subject=subject_clean,
+                status="failed",
+                provider=getattr(result, "provider", current_mode),
+                is_simulated=False,
+                recipient_name=reg_draft.recipient_name if reg_draft else "",
+                company_name=reg_draft.company_name if reg_draft else "",
+                body_preview=body_clean,
+                source_url=reg_draft.source_url if reg_draft else "",
+                error_message=clean_err,
+                dispatched_at=now_err_iso,
+            )
             raise HTTPException(
                 status_code=502,
-                detail=getattr(result, "message", "Dispatch provider rejected transmission.")
+                detail=clean_err,
             )
 
         # Record dispatch in idempotency registry only on success
@@ -409,6 +495,28 @@ async def send_outreach(request: SendOutreachRequest):
             body=body_clean,
             status=result.status,
             provider=result.provider,
+        )
+
+        now_iso = datetime.now(timezone.utc).isoformat()
+
+        # Update draft in registry and persistence
+        if reg_draft:
+            reg_draft.status = "sent"
+            _persist_draft(reg_draft)
+
+        # Record successful / simulated dispatch in outreach history
+        global_dispatch_tracker.record_history_entry(
+            draft_id=request.draft_id,
+            recipient_email=recipient,
+            subject=subject_clean,
+            status=result.status,
+            provider=result.provider,
+            is_simulated=bool(result.is_simulated),
+            recipient_name=reg_draft.recipient_name if reg_draft else "",
+            company_name=reg_draft.company_name if reg_draft else "",
+            body_preview=body_clean,
+            source_url=reg_draft.source_url if reg_draft else "",
+            dispatched_at=now_iso,
         )
     except Exception:
         # On failure or validation exception, release the in-flight claim so retry is possible
@@ -430,6 +538,67 @@ async def send_outreach(request: SendOutreachRequest):
         is_simulated=result.is_simulated,
         provider=result.provider,
     )
+
+@app.get("/api/outreach/history", response_model=OutreachHistoryResponse)
+def get_outreach_history(
+    status: Optional[str] = None,
+    search: Optional[str] = None,
+    query: Optional[str] = None,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    page: int = 1,
+    page_size: int = 25,
+):
+    """
+    Returns paginated, searchable, and filtered outreach history records.
+    Distinguishes simulated, sent, failed, and drafted events.
+    """
+    effective_search = search if search is not None else query
+    items, total, total_pages, counts = global_dispatch_tracker.query_history(
+        status=status,
+        search=effective_search,
+        start_date=start_date,
+        end_date=end_date,
+        page=page,
+        page_size=page_size,
+    )
+    return OutreachHistoryResponse(
+        items=[OutreachHistoryItem(**it) for it in items],
+        total=total,
+        page=page,
+        page_size=page_size,
+        total_pages=total_pages,
+        counts_by_status=counts,
+    )
+
+@app.get("/api/outreach/history/export-csv")
+def export_outreach_history_csv(
+    status: Optional[str] = None,
+    search: Optional[str] = None,
+    query: Optional[str] = None,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+):
+    """
+    Exports filtered outreach history records to an RFC 4180 CSV file stream.
+    All secrets and credentials are sanitized and excluded.
+    """
+    effective_search = search if search is not None else query
+    csv_content = global_dispatch_tracker.export_history_csv(
+        status=status,
+        search=effective_search,
+        start_date=start_date,
+        end_date=end_date,
+    )
+    filename = f"agentdesk_outreach_history_{int(datetime.now(timezone.utc).timestamp())}.csv"
+    return Response(
+        content=csv_content,
+        media_type="text/csv",
+        headers={
+            "Content-Disposition": f"attachment; filename={filename}"
+        }
+    )
+
 
 if __name__ == "__main__":
     uvicorn.run("backend.main:app" if __package__ else "main:app", host="127.0.0.1", port=8000, loop="none")

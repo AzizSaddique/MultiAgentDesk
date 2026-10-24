@@ -17,9 +17,14 @@ class SearchResult:
     query: str = ""
     domain: str = ""
     source_provider: str = ""
+    source_query: str = ""
     metadata: Dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self):
+        if not self.source_query and self.query:
+            self.source_query = self.query
+        elif not self.query and self.source_query:
+            self.query = self.source_query
         if not self.domain and self.url:
             try:
                 from urllib.parse import urlparse
@@ -28,6 +33,7 @@ class SearchResult:
                 self.domain = ""
         if not self.source_provider and self.source:
             self.source_provider = self.source
+
 
 
 class SearchProvider(ABC):

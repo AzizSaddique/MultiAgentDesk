@@ -708,11 +708,13 @@ class LeadDiscoveryService:
         else:
             relevance_notes.append("No public contact email confirmed on page")
 
-        explanation = f"Matched via {candidate.source_query or plan.industry}. " + "; ".join(relevance_notes) + "."
+        query_used = getattr(candidate, "source_query", "") or getattr(candidate, "query", "") or plan.industry
+        explanation = f"Matched via {query_used}. " + "; ".join(relevance_notes) + "."
         relevance_score = min(0.99, round(relevance_score, 2))
 
         lead_id = f"lead-{uuid.uuid4().hex[:10]}"
         now_iso = datetime.now(timezone.utc).isoformat()
+        is_live_source = (getattr(search_provider, "provider_id", "") != "directory")
 
         lead = DiscoveredLeadRecord(
             id=lead_id,
@@ -729,17 +731,18 @@ class LeadDiscoveryService:
             phone_verification_status=phone_status,
             source_urls=source_urls,
             discovery_source=search_provider.display_name,
-            discovery_query=candidate.source_query or plan.original_prompt,
+            discovery_query=getattr(candidate, "source_query", "") or getattr(candidate, "query", "") or plan.original_prompt,
             discovered_at=now_iso,
             relevance_score=relevance_score,
             relevance_explanation=explanation,
             research_status="completed",
             failure_reason=None,
             verified_fields=verified_fields,
-            is_live=True,
+            is_live=is_live_source,
         )
 
         return lead, "completed"
+
 
     def _extract_from_html(
         self,

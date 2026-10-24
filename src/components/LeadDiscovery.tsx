@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import {
   DiscoveryPlan,
   DiscoveryJob,
@@ -34,6 +34,11 @@ import {
   SparklesIcon,
   ChevronLeftIcon,
   ChevronRightIcon,
+  ArrowUpDownIcon,
+  GlobeIcon,
+  BuildingIcon,
+  ShieldAlertIcon,
+  FilterIcon,
 } from './icons';
 
 interface LeadDiscoveryProps {
@@ -42,17 +47,18 @@ interface LeadDiscoveryProps {
 }
 
 const EXAMPLE_PROMPTS = [
+  "Find 20 IoT companies in Germany that may need embedded software development.",
   "Find 100 solar installation companies in Lahore that serve commercial customers.",
-  "Find software houses in Pakistan that might need IoT development services.",
   "Discover manufacturing companies in Saudi Arabia and collect their official websites and publicly listed business contact emails.",
   "Find robotics and automation companies in Germany that could be potential clients.",
+  "Discover European B2B SaaS companies specializing in logistics and supply chain optimization.",
 ];
 
 const DEFAULT_SEARCH_PROVIDERS: SearchProviderInfo[] = [
   {
     id: 'auto',
     name: 'Auto-Select Best Available',
-    description: 'Automatically routes to highest priority configured provider.',
+    description: 'Automatically routes to highest priority configured commercial provider, falling back to public directories.',
     is_configured: true,
     requires_key: false,
     notice: 'Active route: Automatic Provider Selection',
@@ -91,6 +97,14 @@ const DEFAULT_SEARCH_PROVIDERS: SearchProviderInfo[] = [
   },
 ];
 
+const STAGE_STEPS = [
+  { id: 1, label: 'Query Formulation', keyword: 'query' },
+  { id: 2, label: 'Provider Retrieval', keyword: 'search' },
+  { id: 3, label: 'Website Verification', keyword: 'crawling' },
+  { id: 4, label: 'Contact Extraction', keyword: 'extracting' },
+  { id: 5, label: 'Deduplication & Grounding', keyword: 'grounding' },
+];
+
 export const LeadDiscovery: React.FC<LeadDiscoveryProps> = ({
   backendStatus,
   onNavigateToOutreach,
@@ -113,23 +127,33 @@ export const LeadDiscovery: React.FC<LeadDiscoveryProps> = ({
   const [leads, setLeads] = useState<DiscoveredLeadRecord[]>([]);
   const [totalLeads, setTotalLeads] = useState<number>(0);
   const [page, setPage] = useState<number>(1);
-  const [pageSize] = useState<number>(15);
+  const [pageSize, setPageSize] = useState<number>(15);
   const [totalPages, setTotalPages] = useState<number>(1);
   const [verificationCounts, setVerificationCounts] = useState<Record<string, number>>({});
   const [isLoadingLeads, setIsLoadingLeads] = useState<boolean>(false);
 
-  // Table Filters
+  // Table Filters & Sorting
   const [searchFilter, setSearchFilter] = useState<string>('');
   const [emailStatusFilter, setEmailStatusFilter] = useState<string>('');
+  const [sortBy, setSortBy] = useState<string>('relevance_score');
+  const [sortOrder, setSortOrder] = useState<'desc' | 'asc'>('desc');
   const [selectedLeadIds, setSelectedLeadIds] = useState<Set<string>>(new Set());
 
   // Evidence Detail Modal
   const [evidenceLead, setEvidenceLead] = useState<DiscoveredLeadRecord | null>(null);
 
+  // New Keyword input in Plan Editor
+  const [newKeywordInput, setNewKeywordInput] = useState<string>('');
+
   // General Notification / Error
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [successMessage, setSuccessMessage] = useState<string | null>(null);
   const [isTransferring, setIsTransferring] = useState<boolean>(false);
+
+  // Selected Provider Info
+  const currentProviderInfo = useMemo(() => {
+    return providers.find((p) => p.id === selectedProvider) || providers[0];
+  }, [providers, selectedProvider]);
 
   // Load search providers on mount
   useEffect(() => {
@@ -150,6 +174,40 @@ export const LeadDiscovery: React.FC<LeadDiscoveryProps> = ({
     };
   }, []);
 
+  // Load discovered leads with pagination and filters
+  const loadLeads = useCallback(
+    async (
+      jobId: string,
+      pageNum: number,
+      search: string,
+      emailStatus: string,
+      sortField: string,
+      sortDir: string,
+      size: number
+    ) => {
+      setIsLoadingLeads(true);
+      try {
+        const res = await fetchDiscoveredLeads(jobId, {
+          page: pageNum,
+          pageSize: size,
+          search: search || undefined,
+          emailStatus: emailStatus || undefined,
+          sortBy: sortField,
+          sortOrder: sortDir,
+        });
+        setLeads(res.leads);
+        setTotalLeads(res.total);
+        setTotalPages(res.total_pages);
+        setVerificationCounts(res.verification_counts || {});
+      } catch (err: unknown) {
+        // ignore background poll errors
+      } finally {
+        setIsLoadingLeads(false);
+      }
+    },
+    []
+  );
+
   // Poll active job status if job is pending or running
   useEffect(() => {
     if (!activeJob || (activeJob.status !== 'pending' && activeJob.status !== 'running')) {
@@ -162,7 +220,7 @@ export const LeadDiscovery: React.FC<LeadDiscoveryProps> = ({
         setActiveJob(res.job);
 
         // Also refresh the leads table
-        loadLeads(activeJob.id, page, searchFilter, emailStatusFilter);
+        loadLeads(activeJob.id, page, searchFilter, emailStatusFilter, sortBy, sortOrder, pageSize);
 
         if (res.job.status === 'completed') {
           setSuccessMessage(
@@ -177,41 +235,26 @@ export const LeadDiscovery: React.FC<LeadDiscoveryProps> = ({
     }, 2000);
 
     return () => clearInterval(interval);
-  }, [activeJob?.id, activeJob?.status, page, searchFilter, emailStatusFilter]);
+  }, [activeJob?.id, activeJob?.status, page, searchFilter, emailStatusFilter, sortBy, sortOrder, pageSize, loadLeads]);
 
-  // Load discovered leads with pagination and filters
-  const loadLeads = useCallback(
-    async (jobId: string, pageNum: number, search: string, emailStatus: string) => {
-      setIsLoadingLeads(true);
-      try {
-        const res = await fetchDiscoveredLeads(jobId, {
-          page: pageNum,
-          pageSize,
-          search: search || undefined,
-          emailStatus: emailStatus || undefined,
-        });
-        setLeads(res.leads);
-        setTotalLeads(res.total);
-        setTotalPages(res.total_pages);
-        setVerificationCounts(res.verification_counts);
-      } catch (err: unknown) {
-        // ignore background poll errors
-      } finally {
-        setIsLoadingLeads(false);
-      }
-    },
-    [pageSize]
-  );
+  // When filters or sorting change, reload leads
+  useEffect(() => {
+    if (activeJob?.id) {
+      loadLeads(activeJob.id, page, searchFilter, emailStatusFilter, sortBy, sortOrder, pageSize);
+    }
+  }, [activeJob?.id, page, searchFilter, emailStatusFilter, sortBy, sortOrder, pageSize, loadLeads]);
 
   // Trigger natural language plan interpretation
   const handleInterpretPrompt = async () => {
-    if (!prompt.trim()) return;
+    const trimmed = prompt.trim();
+    if (!trimmed) return;
     setIsInterpreting(true);
     setErrorMessage(null);
     setSuccessMessage(null);
     try {
-      const generatedPlan = await generateDiscoveryPlan(prompt.trim());
+      const generatedPlan = await generateDiscoveryPlan(trimmed);
       setPlan(generatedPlan);
+      setSuccessMessage('Search plan generated. Review parameters below and start discovery.');
     } catch (err: unknown) {
       setErrorMessage(err instanceof Error ? err.message : 'Failed to interpret prompt.');
     } finally {
@@ -230,7 +273,9 @@ export const LeadDiscovery: React.FC<LeadDiscoveryProps> = ({
     try {
       const job = await createDiscoveryJob(plan, selectedProvider);
       setActiveJob(job);
-      setSuccessMessage(`Discovery job started with provider [${selectedProvider}]. Pipeline active.`);
+      setSuccessMessage(`Discovery pipeline initiated with provider [${selectedProvider}]. Live telemetry running.`);
+      // Initial lead load
+      loadLeads(job.id, 1, '', '', sortBy, sortOrder, pageSize);
     } catch (err: unknown) {
       setErrorMessage(err instanceof Error ? err.message : 'Failed to start discovery job.');
     } finally {
@@ -245,7 +290,7 @@ export const LeadDiscovery: React.FC<LeadDiscoveryProps> = ({
     try {
       const updated = await cancelDiscoveryJob(activeJob.id);
       setActiveJob(updated);
-      setSuccessMessage('Job cancellation requested. Stopping external requests.');
+      setSuccessMessage('Job cancellation requested. Search engine requests safely halted.');
     } catch (err: unknown) {
       setErrorMessage(err instanceof Error ? err.message : 'Failed to cancel discovery job.');
     } finally {
@@ -274,7 +319,7 @@ export const LeadDiscovery: React.FC<LeadDiscoveryProps> = ({
         `Successfully transferred ${res.total} leads to Outreach (${res.verified_email_count} verified emails). Opening Outreach Console...`
       );
       if (onNavigateToOutreach) {
-        setTimeout(() => onNavigateToOutreach(), 1200);
+        setTimeout(() => onNavigateToOutreach(), 1100);
       }
     } catch (err: unknown) {
       setErrorMessage(err instanceof Error ? err.message : 'Failed to transfer leads.');
@@ -301,24 +346,42 @@ export const LeadDiscovery: React.FC<LeadDiscoveryProps> = ({
     }
   };
 
+  // Plan Keyword management
+  const handleAddKeyword = () => {
+    const kw = newKeywordInput.trim();
+    if (!kw || !plan) return;
+    if (!plan.keywords.includes(kw)) {
+      setPlan({ ...plan, keywords: [...plan.keywords, kw] });
+    }
+    setNewKeywordInput('');
+  };
+
+  const handleRemoveKeyword = (index: number) => {
+    if (!plan) return;
+    const next = [...plan.keywords];
+    next.splice(index, 1);
+    setPlan({ ...plan, keywords: next });
+  };
+
+  // Status badge helper
   const getVerificationBadge = (status: string) => {
     switch (status) {
       case 'verified_public':
         return (
-          <span className="badge badge-active" title="Genuine verified public business email">
+          <span className="badge badge-active" title="Authentic public business email verified on official corporate domain">
             <CheckCircleIcon size={12} /> Verified Public
           </span>
         );
       case 'found_unverified':
         return (
-          <span className="badge" style={{ background: 'rgba(234, 179, 8, 0.15)', color: '#eab308', border: '1px solid rgba(234, 179, 8, 0.3)' }}>
-            Unverified
+          <span className="badge badge-warning" title="Email address found in text but syntax or domain verification pending">
+            <AlertTriangleIcon size={12} /> Unverified
           </span>
         );
       case 'invalid':
         return (
-          <span className="badge badge-offline" title="Syntax invalid or placeholder address">
-            <XIcon size={12} /> Invalid
+          <span className="badge badge-offline" title="Syntax invalid or placeholder address - rejected by safety gate">
+            <XIcon size={12} /> Invalid Format
           </span>
         );
       case 'not_found':
@@ -331,317 +394,549 @@ export const LeadDiscovery: React.FC<LeadDiscoveryProps> = ({
     }
   };
 
+  // Source attribution badge helper
+  const getSourceBadge = (source: string, isLive?: boolean) => {
+    const isDir = !isLive || source?.toLowerCase().includes('directory');
+    if (isDir) {
+      return (
+        <span
+          className="badge"
+          style={{
+            background: 'rgba(148, 163, 184, 0.12)',
+            color: 'var(--text-secondary)',
+            border: '1px solid rgba(148, 163, 184, 0.25)',
+          }}
+          title="Extracted from public business trade directory (Offline safe registry)"
+        >
+          <BuildingIcon size={11} /> Public Directory
+        </span>
+      );
+    }
+    return (
+      <span
+        className="badge badge-cyan"
+        title="Discovered through live web search engine and verified on official website"
+      >
+        <GlobeIcon size={11} /> {source || 'Live Web'}
+      </span>
+    );
+  };
+
+  // Determine active stage index for Stepper
+  const activeStageIndex = useMemo(() => {
+    if (!activeJob) return -1;
+    if (activeJob.status === 'completed') return 5;
+    if (activeJob.status === 'failed' || activeJob.status === 'cancelled') return -1;
+    const stageStr = (activeJob.current_stage || '').toLowerCase();
+    if (stageStr.includes('formulat') || stageStr.includes('query')) return 0;
+    if (stageStr.includes('search') || stageStr.includes('retriev') || stageStr.includes('provider')) return 1;
+    if (stageStr.includes('crawl') || stageStr.includes('website') || stageStr.includes('verif')) return 2;
+    if (stageStr.includes('extract') || stageStr.includes('email') || stageStr.includes('contact')) return 3;
+    if (stageStr.includes('ground') || stageStr.includes('dedup')) return 4;
+    return 1;
+  }, [activeJob]);
+
   return (
-    <div className="lead-discovery-container" style={{ padding: '1.5rem', maxWidth: '1440px', margin: '0 auto' }}>
-      {/* Top Banner & Header */}
-      <div style={{ marginBottom: '1.5rem', display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
-        <div>
-          <div style={{ display: 'flex', alignItems: 'center', gap: '0.65rem' }}>
-            <div style={{ background: 'linear-gradient(135deg, rgba(6,182,212,0.2), rgba(59,130,246,0.2))', padding: '0.5rem', borderRadius: '8px', border: '1px solid rgba(6,182,212,0.3)' }}>
-              <CompassIcon size={24} color="var(--accent-cyan)" />
-            </div>
-            <div>
-              <h2 style={{ fontSize: '1.4rem', fontWeight: 600, color: 'var(--text-primary)', margin: 0 }}>
-                Automated Lead Discovery Agent
-              </h2>
-              <p style={{ fontSize: '0.82rem', color: 'var(--text-muted)', margin: '0.2rem 0 0' }}>
-                Natural-language business discovery across authorized search engines and verified public registries.
-              </p>
-            </div>
+    <div className="discovery-dashboard">
+      {/* Top Header & Breadcrumbs */}
+      <div className="discovery-header-row">
+        <div className="discovery-title-group">
+          <div className="discovery-icon-orb">
+            <CompassIcon size={24} color="var(--accent-cyan)" />
+          </div>
+          <div className="discovery-title-text">
+            <h2>
+              Automated Lead Discovery
+              <span className="badge badge-cyan" style={{ fontSize: '0.65rem', verticalAlign: 'middle' }}>
+                AI Discovery Engine
+              </span>
+            </h2>
+            <p>
+              Natural-language market discovery across live authorized search engines and verified public business directories.
+            </p>
           </div>
         </div>
 
         {/* Global Notifications */}
-        {backendStatus && !backendStatus.isOnline && (
-          <div className="alert alert-warning" style={{ maxWidth: '480px', margin: 0, padding: '0.6rem 0.9rem', fontSize: '0.8rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-            <AlertTriangleIcon size={16} />
-            <span>FastAPI Backend is offline. Start the backend service to perform discovery.</span>
-          </div>
-        )}
-        {errorMessage && (
-          <div className="alert alert-danger" style={{ maxWidth: '480px', margin: 0, padding: '0.6rem 0.9rem', fontSize: '0.8rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-            <AlertTriangleIcon size={16} />
-            <span style={{ flex: 1 }}>{errorMessage}</span>
-            <button onClick={() => setErrorMessage(null)} style={{ background: 'transparent', border: 'none', cursor: 'pointer', color: 'inherit' }}>
-              <XIcon size={14} />
-            </button>
-          </div>
-        )}
-        {successMessage && (
-          <div className="alert alert-success" style={{ maxWidth: '480px', margin: 0, padding: '0.6rem 0.9rem', fontSize: '0.8rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-            <CheckCircleIcon size={16} />
-            <span style={{ flex: 1 }}>{successMessage}</span>
-            <button onClick={() => setSuccessMessage(null)} style={{ background: 'transparent', border: 'none', cursor: 'pointer', color: 'inherit' }}>
-              <XIcon size={14} />
-            </button>
-          </div>
-        )}
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem', maxWidth: '480px', width: '100%' }}>
+          {backendStatus && !backendStatus.isOnline && (
+            <div className="alert alert-warning" style={{ margin: 0, padding: '0.6rem 0.9rem', fontSize: '0.8rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+              <AlertTriangleIcon size={16} />
+              <span>FastAPI Backend is offline. Run backend service to execute discovery.</span>
+            </div>
+          )}
+          {errorMessage && (
+            <div className="alert alert-danger" style={{ margin: 0, padding: '0.65rem 0.95rem', fontSize: '0.8rem', display: 'flex', alignItems: 'center', gap: '0.6rem' }}>
+              <AlertTriangleIcon size={16} />
+              <span style={{ flex: 1 }}>{errorMessage}</span>
+              <button
+                onClick={() => setErrorMessage(null)}
+                style={{ background: 'transparent', border: 'none', cursor: 'pointer', color: 'inherit' }}
+                aria-label="Dismiss error"
+              >
+                <XIcon size={14} />
+              </button>
+            </div>
+          )}
+          {successMessage && (
+            <div className="alert alert-success" style={{ margin: 0, padding: '0.65rem 0.95rem', fontSize: '0.8rem', display: 'flex', alignItems: 'center', gap: '0.6rem' }}>
+              <CheckCircleIcon size={16} />
+              <span style={{ flex: 1 }}>{successMessage}</span>
+              <button
+                onClick={() => setSuccessMessage(null)}
+                style={{ background: 'transparent', border: 'none', cursor: 'pointer', color: 'inherit' }}
+                aria-label="Dismiss message"
+              >
+                <XIcon size={14} />
+              </button>
+            </div>
+          )}
+        </div>
       </div>
 
-      {/* 1. Natural Language Prompt Panel */}
-      <div className="card" style={{ marginBottom: '1.5rem', background: 'var(--bg-secondary)', border: '1px solid var(--border-subtle)', borderRadius: '10px', padding: '1.25rem' }}>
+      {/* 1. Natural Language Search & Prompt Card */}
+      <div className="discovery-hero-card">
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.75rem' }}>
-          <label style={{ fontSize: '0.85rem', fontWeight: 600, color: 'var(--text-primary)', display: 'flex', alignItems: 'center', gap: '0.45rem' }}>
-            <SparklesIcon size={16} color="var(--accent-cyan)" />
+          <label style={{ fontSize: '0.88rem', fontWeight: 700, color: 'var(--text-primary)', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+            <SparklesIcon size={17} color="var(--accent-cyan)" />
             Describe the businesses you want to discover
           </label>
-          <span style={{ fontSize: '0.72rem', color: 'var(--text-muted)' }}>
-            No target URLs required. Searches official websites & business registries.
+          <span style={{ fontSize: '0.74rem', color: 'var(--text-muted)' }}>
+            No target URLs required. Searches official websites & public directories.
           </span>
         </div>
 
-        <textarea
-          className="form-control"
-          rows={3}
-          value={prompt}
-          onChange={(e) => setPrompt(e.target.value)}
-          placeholder="e.g. Find 100 solar installation companies in Lahore that serve commercial customers..."
-          style={{
-            width: '100%',
-            background: 'var(--bg-tertiary)',
-            color: 'var(--text-primary)',
-            border: '1px solid var(--border-subtle)',
-            borderRadius: '8px',
-            padding: '0.75rem',
-            fontSize: '0.9rem',
-            lineHeight: 1.5,
-            resize: 'vertical',
-            fontFamily: 'inherit',
-          }}
-        />
+        <div className="discovery-input-box">
+          <textarea
+            className="discovery-textarea"
+            rows={2}
+            value={prompt}
+            onChange={(e) => setPrompt(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
+                e.preventDefault();
+                handleInterpretPrompt();
+              }
+            }}
+            placeholder="Find 20 IoT companies in Germany that may need embedded software development."
+          />
 
-        {/* Example Prompt Chips */}
-        <div style={{ marginTop: '0.65rem', display: 'flex', flexWrap: 'wrap', gap: '0.45rem', alignItems: 'center' }}>
-          <span style={{ fontSize: '0.72rem', color: 'var(--text-muted)' }}>Examples:</span>
-          {EXAMPLE_PROMPTS.map((ex, i) => (
-            <button
-              key={i}
-              type="button"
-              onClick={() => setPrompt(ex)}
-              style={{
-                background: 'rgba(255, 255, 255, 0.04)',
-                border: '1px solid var(--border-subtle)',
-                color: 'var(--text-secondary)',
-                borderRadius: '16px',
-                padding: '0.2rem 0.6rem',
-                fontSize: '0.7rem',
-                cursor: 'pointer',
-                transition: 'all 0.15s ease',
-              }}
-              onMouseEnter={(e) => (e.currentTarget.style.borderColor = 'var(--accent-cyan)')}
-              onMouseLeave={(e) => (e.currentTarget.style.borderColor = 'var(--border-subtle)')}
-            >
-              {ex.slice(0, 48)}...
-            </button>
-          ))}
+          <div className="discovery-prompt-footer">
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.45rem', alignItems: 'center', flex: 1 }}>
+              <span style={{ fontSize: '0.72rem', color: 'var(--text-muted)', fontWeight: 600 }}>Quick Prompts:</span>
+              {EXAMPLE_PROMPTS.map((ex, i) => (
+                <button
+                  key={i}
+                  type="button"
+                  className="discovery-chip"
+                  onClick={() => setPrompt(ex)}
+                  title={ex}
+                >
+                  <SparklesIcon size={12} color="var(--accent-cyan)" />
+                  {ex.length > 50 ? `${ex.slice(0, 48)}...` : ex}
+                </button>
+              ))}
+            </div>
+
+            <div style={{ display: 'flex', alignItems: 'center', gap: '0.65rem' }}>
+              <button
+                type="button"
+                className="btn btn-secondary"
+                onClick={() => setPrompt('')}
+                disabled={!prompt.trim() || isInterpreting}
+                style={{ fontSize: '0.78rem', padding: '0.45rem 0.75rem' }}
+              >
+                Clear
+              </button>
+              <button
+                type="button"
+                className="btn btn-primary"
+                onClick={handleInterpretPrompt}
+                disabled={isInterpreting || !prompt.trim()}
+                style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', padding: '0.55rem 1.25rem', fontWeight: 600 }}
+              >
+                {isInterpreting ? (
+                  <>
+                    <RefreshCwIcon size={15} className="spin" /> Interpreting Prompt...
+                  </>
+                ) : (
+                  <>
+                    <SparklesIcon size={15} /> Interpret & Create Plan
+                  </>
+                )}
+              </button>
+            </div>
+          </div>
         </div>
 
-        <div style={{ marginTop: '1rem', display: 'flex', justifyContent: 'flex-end', gap: '0.75rem' }}>
-          <button
-            className="btn btn-primary"
-            onClick={handleInterpretPrompt}
-            disabled={isInterpreting || !prompt.trim()}
-            style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', padding: '0.55rem 1.1rem' }}
-          >
-            {isInterpreting ? (
-              <>
-                <RefreshCwIcon size={15} className="spin" /> Interpreting Request...
-              </>
-            ) : (
-              <>
-                <SparklesIcon size={15} /> Interpret & Create Plan
-              </>
-            )}
-          </button>
-        </div>
-      </div>
-
-      {/* 2. Interpreted Plan & Provider Configuration */}
-      {plan && (
-        <div className="card" style={{ marginBottom: '1.5rem', background: 'var(--bg-secondary)', border: '1px solid var(--border-subtle)', borderRadius: '10px', padding: '1.25rem' }}>
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1rem' }}>
-            <h3 style={{ fontSize: '0.95rem', fontWeight: 600, color: 'var(--text-primary)', margin: 0, display: 'flex', alignItems: 'center', gap: '0.45rem' }}>
-              <CompassIcon size={16} color="var(--accent-cyan)" /> Structured Search Plan
-            </h3>
-            <span className="badge badge-cyan" style={{ fontSize: '0.72rem' }}>
-              Review & Customize
+        {/* 2. Provider Selector (Always visible) */}
+        <div className="provider-select-section">
+          <div className="provider-section-label">
+            <span>Select Discovery Search Provider</span>
+            <span style={{ fontSize: '0.7rem', textTransform: 'none', color: 'var(--text-muted)' }}>
+              Live availability from microservice
             </span>
           </div>
 
-          {/* Ambiguity Alert */}
+          <div className="provider-grid">
+            {providers.map((p) => {
+              const isSelected = selectedProvider === p.id;
+              const isDir = p.id === 'directory';
+              const isAuto = p.id === 'auto';
+
+              return (
+                <div
+                  key={p.id}
+                  className={`provider-card ${isSelected ? 'selected' : ''}`}
+                  onClick={() => setSelectedProvider(p.id)}
+                  role="button"
+                  tabIndex={0}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter' || e.key === ' ') {
+                      setSelectedProvider(p.id);
+                    }
+                  }}
+                >
+                  <div>
+                    <div className="provider-card-header">
+                      <span className="provider-card-title">{p.name}</span>
+                      {isAuto ? (
+                        <span className="badge badge-cyan" style={{ fontSize: '0.62rem' }}>
+                          Auto
+                        </span>
+                      ) : isDir ? (
+                        <span className="badge" style={{ background: 'rgba(148, 163, 184, 0.15)', color: 'var(--text-primary)', fontSize: '0.62rem' }}>
+                          Offline Safe
+                        </span>
+                      ) : p.is_configured ? (
+                        <span className="badge badge-active" style={{ fontSize: '0.62rem' }}>
+                          <span className="badge-dot" /> Ready
+                        </span>
+                      ) : (
+                        <span className="badge badge-offline" style={{ fontSize: '0.62rem' }}>
+                          Needs Key
+                        </span>
+                      )}
+                    </div>
+                    <p className="provider-card-desc">{p.description}</p>
+                  </div>
+
+                  <div className="provider-card-notice">
+                    {p.is_configured ? (
+                      <span style={{ color: isAuto ? 'var(--accent-cyan)' : '#34d399' }}>
+                        ✓ {p.notice}
+                      </span>
+                    ) : (
+                      <span style={{ color: '#f87171' }}>
+                        ⚠ {p.notice}
+                      </span>
+                    )}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+
+          {/* Provider Not Configured Alert State */}
+          {!currentProviderInfo.is_configured && (
+            <div className="provider-alert-card">
+              <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
+                <AlertTriangleIcon size={20} color="#f87171" />
+                <div>
+                  <strong style={{ color: '#f87171', fontSize: '0.85rem' }}>
+                    {currentProviderInfo.name} is not configured
+                  </strong>
+                  <p style={{ margin: '0.15rem 0 0', fontSize: '0.78rem', color: 'var(--text-secondary)' }}>
+                    {currentProviderInfo.notice} Switch to Public Business Directory for offline discovery or Auto-Select to route automatically.
+                  </p>
+                </div>
+              </div>
+              <div style={{ display: 'flex', gap: '0.5rem', flexShrink: 0 }}>
+                <button
+                  type="button"
+                  className="btn btn-secondary"
+                  onClick={() => setSelectedProvider('directory')}
+                  style={{ fontSize: '0.76rem', padding: '0.35rem 0.75rem' }}
+                >
+                  Use Public Directory
+                </button>
+                <button
+                  type="button"
+                  className="btn btn-secondary"
+                  onClick={() => setSelectedProvider('auto')}
+                  style={{ fontSize: '0.76rem', padding: '0.35rem 0.75rem', borderColor: 'var(--accent-cyan)', color: 'var(--accent-cyan)' }}
+                >
+                  Use Auto-Select
+                </button>
+              </div>
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* 3. Structured Search-Plan Preview & Customizer */}
+      {plan && (
+        <div className="search-plan-card">
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1rem', flexWrap: 'wrap', gap: '0.5rem' }}>
+            <div>
+              <h3 style={{ fontSize: '1.05rem', fontWeight: 700, color: 'var(--text-primary)', margin: 0, display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                <CompassIcon size={18} color="var(--accent-cyan)" />
+                Structured Search Plan Preview
+              </h3>
+              <p style={{ margin: '0.2rem 0 0', fontSize: '0.78rem', color: 'var(--text-secondary)' }}>
+                Review and customize search parameters extracted from your request before discovery begins.
+              </p>
+            </div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+              <span className="badge badge-cyan" style={{ fontSize: '0.72rem' }}>
+                Route: {currentProviderInfo.name}
+              </span>
+            </div>
+          </div>
+
+          {/* Ambiguity Alert Banner */}
           {plan.is_ambiguous && (
             <div className="alert alert-warning" style={{ marginBottom: '1rem', padding: '0.75rem 1rem', fontSize: '0.82rem', display: 'flex', alignItems: 'center', gap: '0.65rem' }}>
-              <AlertTriangleIcon size={18} color="#eab308" />
+              <AlertTriangleIcon size={18} color="#fbbf24" />
               <div>
-                <strong>Ambiguous Criteria: </strong>
-                {plan.clarification_question || 'Please provide more details on target industry or location.'}
+                <strong>Ambiguity Detected: </strong>
+                {plan.clarification_question || 'Target criteria could be broader or narrower. Adjust the fields below as needed.'}
               </div>
             </div>
           )}
 
           {/* Plan Form Fields Grid */}
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: '1rem' }}>
-            <div>
-              <label style={{ fontSize: '0.75rem', color: 'var(--text-muted)', display: 'block', marginBottom: '0.3rem' }}>
-                Industry / Category
+          <div className="plan-grid">
+            <div className="form-group">
+              <label className="form-label">
+                <BuildingIcon size={13} color="var(--accent-cyan)" /> Target Industry / Category
               </label>
               <input
                 type="text"
-                className="form-control"
+                className="form-input"
                 value={plan.industry}
                 onChange={(e) => setPlan({ ...plan, industry: e.target.value })}
-                style={{ width: '100%', padding: '0.45rem 0.65rem', fontSize: '0.85rem' }}
+                placeholder="e.g. IoT, Embedded Software, Solar"
               />
             </div>
 
-            <div>
-              <label style={{ fontSize: '0.75rem', color: 'var(--text-muted)', display: 'block', marginBottom: '0.3rem' }}>
-                City
+            <div className="form-group">
+              <label className="form-label">
+                <MapPinIcon size={13} color="var(--accent-cyan)" /> City / Metro
               </label>
               <input
                 type="text"
-                className="form-control"
+                className="form-input"
                 value={plan.location_city || ''}
-                placeholder="e.g. Lahore, Berlin, Riyadh"
+                placeholder="e.g. Berlin, Munich, Lahore, Riyadh"
                 onChange={(e) => setPlan({ ...plan, location_city: e.target.value })}
-                style={{ width: '100%', padding: '0.45rem 0.65rem', fontSize: '0.85rem' }}
               />
             </div>
 
-            <div>
-              <label style={{ fontSize: '0.75rem', color: 'var(--text-muted)', display: 'block', marginBottom: '0.3rem' }}>
-                Country
+            <div className="form-group">
+              <label className="form-label">
+                <GlobeIcon size={13} color="var(--accent-cyan)" /> Country / Region
               </label>
               <input
                 type="text"
-                className="form-control"
+                className="form-input"
                 value={plan.location_country || ''}
-                placeholder="e.g. Pakistan, Germany"
+                placeholder="e.g. Germany, Pakistan, Saudi Arabia"
                 onChange={(e) => setPlan({ ...plan, location_country: e.target.value })}
-                style={{ width: '100%', padding: '0.45rem 0.65rem', fontSize: '0.85rem' }}
               />
             </div>
 
-            <div>
-              <label style={{ fontSize: '0.75rem', color: 'var(--text-muted)', display: 'block', marginBottom: '0.3rem' }}>
-                Target Lead Count
+            <div className="form-group">
+              <label className="form-label">
+                <SearchIcon size={13} color="var(--accent-cyan)" /> Target Lead Count
               </label>
-              <input
-                type="number"
-                min={1}
-                max={100}
-                className="form-control"
-                value={plan.target_lead_count}
-                onChange={(e) => setPlan({ ...plan, target_lead_count: parseInt(e.target.value) || 25 })}
-                style={{ width: '100%', padding: '0.45rem 0.65rem', fontSize: '0.85rem' }}
-              />
+              <div style={{ display: 'flex', gap: '0.4rem', alignItems: 'center' }}>
+                <input
+                  type="number"
+                  min={1}
+                  max={100}
+                  className="form-input"
+                  style={{ width: '90px' }}
+                  value={plan.target_lead_count}
+                  onChange={(e) => setPlan({ ...plan, target_lead_count: Math.min(100, Math.max(1, parseInt(e.target.value) || 20)) })}
+                />
+                <div style={{ display: 'flex', gap: '0.25rem' }}>
+                  {[10, 20, 50].map((n) => (
+                    <button
+                      key={n}
+                      type="button"
+                      className="preset-chip"
+                      style={{ padding: '0.2rem 0.45rem', fontSize: '0.7rem' }}
+                      onClick={() => setPlan({ ...plan, target_lead_count: n })}
+                    >
+                      {n}
+                    </button>
+                  ))}
+                </div>
+              </div>
             </div>
           </div>
 
-          {/* Search Source Selector */}
-          <div style={{ marginTop: '1.2rem', paddingTop: '1rem', borderTop: '1px solid var(--border-subtle)' }}>
-            <label style={{ fontSize: '0.8rem', fontWeight: 600, color: 'var(--text-primary)', display: 'block', marginBottom: '0.5rem' }}>
-              Search Source & Provider:
+          {/* Keywords Tag Editor */}
+          <div style={{ marginBottom: '1.25rem' }}>
+            <label className="form-label" style={{ marginBottom: '0.45rem' }}>
+              Extracted Search Keywords:
             </label>
-            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(260px, 1fr))', gap: '0.75rem' }}>
-              {providers.map((p) => {
-                const isSelected = selectedProvider === p.id;
-                return (
-                  <div
-                    key={p.id}
-                    onClick={() => setSelectedProvider(p.id)}
-                    style={{
-                      padding: '0.75rem',
-                      borderRadius: '8px',
-                      cursor: 'pointer',
-                      background: isSelected ? 'rgba(6,182,212,0.12)' : 'var(--bg-tertiary)',
-                      border: isSelected ? '1px solid var(--accent-cyan)' : '1px solid var(--border-subtle)',
-                      transition: 'all 0.15s ease',
-                    }}
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.4rem', alignItems: 'center', marginBottom: '0.6rem' }}>
+              {plan.keywords.map((kw, i) => (
+                <span key={i} className="plan-keyword-tag">
+                  {kw}
+                  <button
+                    type="button"
+                    onClick={() => handleRemoveKeyword(i)}
+                    style={{ background: 'transparent', border: 'none', color: 'inherit', cursor: 'pointer', padding: 0, display: 'inline-flex' }}
+                    title="Remove keyword"
                   >
-                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.25rem' }}>
-                      <span style={{ fontSize: '0.82rem', fontWeight: 600, color: 'var(--text-primary)' }}>{p.name}</span>
-                      {p.is_configured ? (
-                        <span className="badge badge-active" style={{ fontSize: '0.62rem' }}>Ready</span>
-                      ) : (
-                        <span className="badge badge-offline" style={{ fontSize: '0.62rem' }}>Needs Setup</span>
-                      )}
-                    </div>
-                    <p style={{ fontSize: '0.72rem', color: 'var(--text-muted)', margin: '0 0 0.35rem' }}>{p.description}</p>
-                    <span style={{ fontSize: '0.68rem', color: p.is_configured ? 'var(--accent-cyan)' : '#f87171' }}>
-                      {p.notice}
-                    </span>
-                  </div>
-                );
-              })}
+                    <XIcon size={12} />
+                  </button>
+                </span>
+              ))}
+
+              <div style={{ display: 'inline-flex', gap: '0.3rem', alignItems: 'center' }}>
+                <input
+                  type="text"
+                  placeholder="+ Add keyword..."
+                  value={newKeywordInput}
+                  onChange={(e) => setNewKeywordInput(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') {
+                      e.preventDefault();
+                      handleAddKeyword();
+                    }
+                  }}
+                  style={{
+                    background: 'rgba(15, 23, 42, 0.6)',
+                    border: '1px dashed var(--border-subtle)',
+                    borderRadius: '16px',
+                    padding: '0.2rem 0.65rem',
+                    fontSize: '0.72rem',
+                    color: 'var(--text-primary)',
+                    outline: 'none',
+                    width: '120px',
+                  }}
+                />
+                {newKeywordInput.trim() && (
+                  <button
+                    type="button"
+                    onClick={handleAddKeyword}
+                    className="btn btn-secondary"
+                    style={{ padding: '0.15rem 0.45rem', fontSize: '0.7rem', borderRadius: '12px' }}
+                  >
+                    Add
+                  </button>
+                )}
+              </div>
             </div>
           </div>
 
-          {/* Start Button */}
-          <div style={{ marginTop: '1.25rem', display: 'flex', justifyContent: 'flex-end', gap: '0.75rem' }}>
-            <button
-              className="btn btn-primary"
-              onClick={handleStartDiscovery}
-              disabled={Boolean(isStartingJob || (activeJob && (activeJob.status === 'pending' || activeJob.status === 'running')))}
-              style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', padding: '0.6rem 1.4rem', fontWeight: 600 }}
-            >
-              {isStartingJob ? (
-                <>
-                  <RefreshCwIcon size={16} className="spin" /> Initializing Discovery...
-                </>
-              ) : (
-                <>
-                  <CompassIcon size={16} /> Start Automated Discovery
-                </>
-              )}
-            </button>
+          {/* Action Row */}
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', borderTop: '1px solid var(--border-subtle)', paddingTop: '1rem', flexWrap: 'wrap', gap: '0.75rem' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', fontSize: '0.78rem', color: 'var(--text-muted)' }}>
+              <ShieldAlertIcon size={14} color="#34d399" />
+              <span>Strict public domain verification & SSRF protection enforced.</span>
+            </div>
+
+            <div style={{ display: 'flex', gap: '0.75rem' }}>
+              <button
+                type="button"
+                className="btn btn-primary"
+                onClick={handleStartDiscovery}
+                disabled={Boolean(isStartingJob || (activeJob && (activeJob.status === 'pending' || activeJob.status === 'running')))}
+                style={{ display: 'flex', alignItems: 'center', gap: '0.55rem', padding: '0.65rem 1.6rem', fontSize: '0.9rem', fontWeight: 700 }}
+              >
+                {isStartingJob ? (
+                  <>
+                    <RefreshCwIcon size={17} className="spin" /> Starting Discovery Pipeline...
+                  </>
+                ) : (
+                  <>
+                    <CompassIcon size={17} /> Discover Leads
+                  </>
+                )}
+              </button>
+            </div>
           </div>
         </div>
       )}
 
-      {/* 3. Live Telemetry & Progress Card */}
+      {/* 4. Live Telemetry & Discovery Stages Panel */}
       {activeJob && (
-        <div className="card" style={{ marginBottom: '1.5rem', background: 'var(--bg-secondary)', border: '1px solid var(--border-subtle)', borderRadius: '10px', padding: '1.25rem' }}>
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.75rem' }}>
+        <div className="telemetry-panel">
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', flexWrap: 'wrap', gap: '0.75rem' }}>
             <div>
-              <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.05em' }}>
-                Job ID: {activeJob.id} • Source: {activeJob.provider_used}
-              </span>
-              <div style={{ fontSize: '0.92rem', fontWeight: 600, color: 'var(--text-primary)', marginTop: '0.2rem' }}>
-                {activeJob.current_stage || 'Discovery in progress'}
+              <div style={{ display: 'flex', alignItems: 'center', gap: '0.6rem' }}>
+                <span style={{ fontSize: '0.72rem', color: 'var(--text-muted)', fontFamily: 'var(--font-mono)' }}>
+                  JOB: {activeJob.id}
+                </span>
+                {getSourceBadge(activeJob.provider_used, true)}
+                <span
+                  className={`badge ${
+                    activeJob.status === 'completed'
+                      ? 'badge-active'
+                      : activeJob.status === 'failed' || activeJob.status === 'cancelled'
+                      ? 'badge-offline'
+                      : 'badge-cyan'
+                  }`}
+                  style={{ fontSize: '0.7rem' }}
+                >
+                  {activeJob.status.toUpperCase()}
+                </span>
+              </div>
+              <div style={{ fontSize: '1rem', fontWeight: 700, color: 'var(--text-primary)', marginTop: '0.25rem' }}>
+                {activeJob.current_stage || 'Pipeline in progress...'}
               </div>
             </div>
 
-            <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
-              <span
-                className={`badge ${
-                  activeJob.status === 'completed'
-                    ? 'badge-active'
-                    : activeJob.status === 'failed' || activeJob.status === 'cancelled'
-                    ? 'badge-offline'
-                    : 'badge-cyan'
-                }`}
-                style={{ fontSize: '0.75rem' }}
+            {(activeJob.status === 'running' || activeJob.status === 'pending') && (
+              <button
+                type="button"
+                className="btn btn-secondary"
+                onClick={handleCancelJob}
+                disabled={isCancelling}
+                style={{
+                  color: '#f87171',
+                  borderColor: 'rgba(248,113,113,0.3)',
+                  padding: '0.45rem 0.95rem',
+                  fontSize: '0.8rem',
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '0.45rem',
+                }}
               >
-                {activeJob.status.toUpperCase()}
-              </span>
+                <StopCircleIcon size={15} color="#f87171" />
+                {isCancelling ? 'Cancelling Discovery...' : 'Cancel Discovery'}
+              </button>
+            )}
+          </div>
 
-              {(activeJob.status === 'running' || activeJob.status === 'pending') && (
-                <button
-                  className="btn btn-secondary"
-                  onClick={handleCancelJob}
-                  disabled={isCancelling}
-                  style={{ color: '#f87171', borderColor: 'rgba(248,113,113,0.3)', padding: '0.4rem 0.8rem', fontSize: '0.78rem' }}
+          {/* Discovery Stage Stepper */}
+          <div className="stage-stepper">
+            {STAGE_STEPS.map((step, idx) => {
+              const isDone = activeJob.status === 'completed' || idx < activeStageIndex;
+              const isActive = activeJob.status === 'running' && idx === activeStageIndex;
+              return (
+                <div
+                  key={step.id}
+                  className={`stepper-item ${isDone ? 'completed' : ''} ${isActive ? 'active' : ''}`}
                 >
-                  <StopCircleIcon size={14} color="#f87171" />
-                  {isCancelling ? 'Cancelling...' : 'Cancel Job'}
-                </button>
-              )}
-            </div>
+                  <div className="stepper-circle">
+                    {isDone ? <CheckIcon size={12} /> : step.id}
+                  </div>
+                  <div style={{ fontSize: '0.76rem', fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                    {step.label}
+                  </div>
+                </div>
+              );
+            })}
           </div>
 
           {/* Progress Bar */}
-          <div style={{ width: '100%', height: '8px', background: 'var(--bg-tertiary)', borderRadius: '4px', overflow: 'hidden', marginBottom: '1rem' }}>
+          <div style={{ width: '100%', height: '8px', background: 'var(--bg-tertiary)', borderRadius: '4px', overflow: 'hidden', margin: '0.75rem 0' }}>
             <div
               style={{
                 width: `${activeJob.progress_percent}%`,
@@ -652,69 +947,81 @@ export const LeadDiscovery: React.FC<LeadDiscoveryProps> = ({
             />
           </div>
 
-          {/* KPI Counters */}
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(140px, 1fr))', gap: '0.75rem' }}>
-            <div style={{ background: 'var(--bg-tertiary)', padding: '0.65rem 0.85rem', borderRadius: '8px', border: '1px solid var(--border-subtle)' }}>
-              <span style={{ fontSize: '0.7rem', color: 'var(--text-muted)' }}>Discovered Leads</span>
-              <div style={{ fontSize: '1.25rem', fontWeight: 700, color: 'var(--text-primary)' }}>
-                {activeJob.discovered_count} / {activeJob.total_target}
+          {/* Summary KPI Metrics Grid */}
+          <div className="metrics-row">
+            <div className="metric-card">
+              <span className="metric-card-label">
+                <BuildingIcon size={13} color="var(--accent-cyan)" /> Discovered Leads
+              </span>
+              <div className="metric-card-val">
+                {activeJob.discovered_count}{' '}
+                <span style={{ fontSize: '0.85rem', color: 'var(--text-muted)', fontWeight: 500 }}>
+                  / {activeJob.total_target}
+                </span>
               </div>
             </div>
 
-            <div style={{ background: 'var(--bg-tertiary)', padding: '0.65rem 0.85rem', borderRadius: '8px', border: '1px solid var(--border-subtle)' }}>
-              <span style={{ fontSize: '0.7rem', color: 'var(--text-muted)' }}>Verified Public Emails</span>
-              <div style={{ fontSize: '1.25rem', fontWeight: 700, color: 'var(--accent-cyan)' }}>
+            <div className="metric-card">
+              <span className="metric-card-label">
+                <CheckCircleIcon size={13} color="#10b981" /> Verified Public Emails
+              </span>
+              <div className="metric-card-val" style={{ color: '#34d399' }}>
                 {activeJob.verified_email_count}
               </div>
             </div>
 
-            <div style={{ background: 'var(--bg-tertiary)', padding: '0.65rem 0.85rem', borderRadius: '8px', border: '1px solid var(--border-subtle)' }}>
-              <span style={{ fontSize: '0.7rem', color: 'var(--text-muted)' }}>Duplicates Skipped</span>
-              <div style={{ fontSize: '1.25rem', fontWeight: 700, color: 'var(--text-secondary)' }}>
+            <div className="metric-card">
+              <span className="metric-card-label">
+                <FilterIcon size={13} color="var(--accent-cyan)" /> Duplicates Filtered
+              </span>
+              <div className="metric-card-val">
                 {activeJob.duplicate_count}
               </div>
             </div>
 
-            <div style={{ background: 'var(--bg-tertiary)', padding: '0.65rem 0.85rem', borderRadius: '8px', border: '1px solid var(--border-subtle)' }}>
-              <span style={{ fontSize: '0.7rem', color: 'var(--text-muted)' }}>Skipped / Restricted</span>
-              <div style={{ fontSize: '1.25rem', fontWeight: 700, color: '#eab308' }}>
-                {activeJob.skipped_count}
-              </div>
-            </div>
-
-            <div style={{ background: 'var(--bg-tertiary)', padding: '0.65rem 0.85rem', borderRadius: '8px', border: '1px solid var(--border-subtle)' }}>
-              <span style={{ fontSize: '0.7rem', color: 'var(--text-muted)' }}>Inaccessible / Failed</span>
-              <div style={{ fontSize: '1.25rem', fontWeight: 700, color: '#f87171' }}>
-                {activeJob.failed_count}
+            <div className="metric-card">
+              <span className="metric-card-label">
+                <AlertTriangleIcon size={13} color="#f87171" /> Failed / Skipped
+              </span>
+              <div className="metric-card-val" style={{ color: activeJob.failed_count + activeJob.skipped_count > 0 ? '#f87171' : 'var(--text-secondary)' }}>
+                {activeJob.failed_count + activeJob.skipped_count}
               </div>
             </div>
           </div>
         </div>
       )}
 
-      {/* 4. Discovered Leads Table & Actions */}
-      <div className="card" style={{ background: 'var(--bg-secondary)', border: '1px solid var(--border-subtle)', borderRadius: '10px', padding: '1.25rem' }}>
-        <div style={{ display: 'flex', flexWrap: 'wrap', justifyContent: 'space-between', alignItems: 'center', gap: '0.75rem', marginBottom: '1rem' }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: '0.65rem', flex: 1, minWidth: '280px' }}>
-            <div style={{ position: 'relative', flex: 1 }}>
+      {/* 5. Discovered Leads Table & Management Suite */}
+      <div className="leads-table-card">
+        <div className="leads-toolbar">
+          <div className="leads-toolbar-left">
+            {/* Search Filter */}
+            <div style={{ position: 'relative', flex: 1, minWidth: '220px' }}>
               <input
                 type="text"
-                className="form-control"
+                className="form-input"
                 placeholder="Search discovered companies, emails, or domains..."
                 value={searchFilter}
-                onChange={(e) => setSearchFilter(e.target.value)}
-                style={{ paddingLeft: '2rem', width: '100%', fontSize: '0.85rem' }}
+                onChange={(e) => {
+                  setSearchFilter(e.target.value);
+                  setPage(1);
+                }}
+                style={{ paddingLeft: '2.1rem', width: '100%', fontSize: '0.82rem' }}
               />
-              <div style={{ position: 'absolute', left: '0.65rem', top: '50%', transform: 'translateY(-50%)', pointerEvents: 'none' }}>
+              <div style={{ position: 'absolute', left: '0.75rem', top: '50%', transform: 'translateY(-50%)', pointerEvents: 'none' }}>
                 <SearchIcon size={14} color="var(--text-muted)" />
               </div>
             </div>
 
+            {/* Email Verification Filter */}
             <select
-              className="form-control"
+              className="form-select"
               value={emailStatusFilter}
-              onChange={(e) => setEmailStatusFilter(e.target.value)}
-              style={{ width: '170px', fontSize: '0.82rem' }}
+              onChange={(e) => {
+                setEmailStatusFilter(e.target.value);
+                setPage(1);
+              }}
+              style={{ width: '180px', fontSize: '0.8rem' }}
             >
               <option value="">All Verification States</option>
               <option value="verified_public">Verified Public ({verificationCounts.verified_public || 0})</option>
@@ -723,68 +1030,101 @@ export const LeadDiscovery: React.FC<LeadDiscoveryProps> = ({
               <option value="invalid">Invalid ({verificationCounts.invalid || 0})</option>
             </select>
 
-            {verificationCounts.verified_public ? (
-              <span className="badge badge-active" style={{ fontSize: '0.72rem', whiteSpace: 'nowrap' }}>
-                <CheckCircleIcon size={11} /> {verificationCounts.verified_public} Verified Public
-              </span>
-            ) : null}
+            {/* Sorting Dropdown */}
+            <div style={{ display: 'flex', alignItems: 'center', gap: '0.35rem' }}>
+              <select
+                className="form-select"
+                value={sortBy}
+                onChange={(e) => setSortBy(e.target.value)}
+                style={{ width: '150px', fontSize: '0.8rem' }}
+              >
+                <option value="relevance_score">Sort: Relevance</option>
+                <option value="discovered_at">Sort: Discovered Date</option>
+                <option value="company_name">Sort: Company Name</option>
+                <option value="email_verification_status">Sort: Email Status</option>
+              </select>
+
+              <button
+                type="button"
+                className="btn btn-secondary"
+                onClick={() => setSortOrder((prev) => (prev === 'desc' ? 'asc' : 'desc'))}
+                title={`Sort ${sortOrder === 'desc' ? 'Descending' : 'Ascending'}`}
+                style={{ padding: '0.45rem 0.6rem' }}
+              >
+                <ArrowUpDownIcon size={14} />
+              </button>
+            </div>
           </div>
 
-          <div style={{ display: 'flex', gap: '0.5rem' }}>
+          {/* Action Buttons */}
+          <div className="leads-toolbar-right">
             <button
+              type="button"
               className="btn btn-secondary"
               onClick={handleExportCsv}
               disabled={!activeJob || leads.length === 0}
               style={{ display: 'flex', alignItems: 'center', gap: '0.45rem', fontSize: '0.8rem' }}
+              title="Download RFC 4180 CSV export"
             >
               <DownloadIcon size={14} /> Export CSV
             </button>
 
             <button
+              type="button"
               className="btn btn-primary"
               onClick={handleTransferToOutreach}
               disabled={isTransferring || selectedLeadIds.size === 0}
-              style={{ display: 'flex', alignItems: 'center', gap: '0.45rem', fontSize: '0.8rem' }}
+              style={{ display: 'flex', alignItems: 'center', gap: '0.45rem', fontSize: '0.8rem', fontWeight: 600 }}
+              title="Transfer selected leads to Outreach Console for drafting"
             >
               <SendIcon size={14} />
-              {isTransferring ? 'Drafting...' : `Transfer to Outreach (${selectedLeadIds.size})`}
+              {isTransferring ? 'Transferring...' : `Transfer to Outreach (${selectedLeadIds.size})`}
             </button>
           </div>
         </div>
 
-        {/* Table */}
-        <div style={{ overflowX: 'auto' }}>
-          <table className="table" style={{ width: '100%', borderCollapse: 'collapse', fontSize: '0.82rem' }}>
+        {/* Leads Table */}
+        <div className="table-responsive-container">
+          <table className="modern-leads-table">
             <thead>
-              <tr style={{ borderBottom: '1px solid var(--border-subtle)', color: 'var(--text-muted)', textAlign: 'left' }}>
-                <th style={{ padding: '0.6rem 0.5rem', width: '36px' }}>
+              <tr>
+                <th style={{ width: '36px', textAlign: 'center' }}>
                   <input
                     type="checkbox"
                     checked={selectedLeadIds.size === leads.length && leads.length > 0}
                     onChange={toggleSelectAllVisible}
+                    aria-label="Select all leads"
                   />
                 </th>
-                <th style={{ padding: '0.6rem 0.75rem' }}>Company & Official Website</th>
-                <th style={{ padding: '0.6rem 0.75rem' }}>Location</th>
-                <th style={{ padding: '0.6rem 0.75rem' }}>Public Business Email</th>
-                <th style={{ padding: '0.6rem 0.75rem' }}>Public Phone</th>
-                <th style={{ padding: '0.6rem 0.75rem' }}>Relevance</th>
-                <th style={{ padding: '0.6rem 0.75rem', textAlign: 'right' }}>Actions</th>
+                <th>Company & Official Website</th>
+                <th>Location</th>
+                <th>Public Business Email</th>
+                <th>Public Phone</th>
+                <th>Source Evidence</th>
+                <th style={{ textAlign: 'center' }}>Relevance</th>
+                <th style={{ textAlign: 'right' }}>Actions</th>
               </tr>
             </thead>
             <tbody>
               {leads.length === 0 ? (
                 <tr>
-                  <td colSpan={7} style={{ textAlign: 'center', padding: '3rem 1rem', color: 'var(--text-muted)' }}>
+                  <td colSpan={8} style={{ textAlign: 'center', padding: '3.5rem 1rem' }}>
                     {isLoadingLeads ? (
-                      <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '0.5rem' }}>
-                        <RefreshCwIcon size={20} className="spin" />
-                        <span>Searching web sources and verifying records...</span>
+                      <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '0.65rem' }}>
+                        <RefreshCwIcon size={24} className="spin" color="var(--accent-cyan)" />
+                        <span style={{ color: 'var(--text-secondary)', fontSize: '0.85rem' }}>
+                          Querying search engine and verifying official sources...
+                        </span>
                       </div>
                     ) : (
-                      <div>
-                        <CompassIcon size={32} color="var(--border-subtle)" style={{ marginBottom: '0.5rem' }} />
-                        <p style={{ margin: 0 }}>No leads discovered yet. Enter a request above and start discovery.</p>
+                      <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '0.5rem' }}>
+                        <CompassIcon size={36} color="var(--border-subtle)" />
+                        <p style={{ margin: 0, fontWeight: 600, color: 'var(--text-secondary)' }}>
+                          No leads discovered yet
+                        </p>
+                        <span style={{ fontSize: '0.78rem', color: 'var(--text-muted)' }}>
+                          Enter your research request above and click &quot;Discover Leads&quot; to begin.
+                        </span>
                       </div>
                     )}
                   </td>
@@ -792,78 +1132,99 @@ export const LeadDiscovery: React.FC<LeadDiscoveryProps> = ({
               ) : (
                 leads.map((lead) => {
                   const isChecked = selectedLeadIds.has(lead.id);
+                  const relevancePct = Math.round((lead.relevance_score || 0) * 100);
+
                   return (
-                    <tr
-                      key={lead.id}
-                      style={{
-                        borderBottom: '1px solid rgba(255,255,255,0.04)',
-                        background: isChecked ? 'rgba(6,182,212,0.06)' : undefined,
-                      }}
-                    >
-                      <td style={{ padding: '0.65rem 0.5rem' }}>
+                    <tr key={lead.id} className={isChecked ? 'selected' : ''}>
+                      <td style={{ textAlign: 'center' }}>
                         <input
                           type="checkbox"
                           checked={isChecked}
                           onChange={() => toggleSelectLead(lead.id)}
+                          aria-label={`Select ${lead.company_name}`}
                         />
                       </td>
 
-                      <td style={{ padding: '0.65rem 0.75rem' }}>
-                        <div style={{ fontWeight: 600, color: 'var(--text-primary)' }}>{lead.company_name}</div>
-                        <a
-                          href={lead.website}
-                          target="_blank"
-                          rel="noreferrer"
-                          style={{
-                            fontSize: '0.72rem',
-                            color: 'var(--accent-cyan)',
-                            display: 'inline-flex',
-                            alignItems: 'center',
-                            gap: '0.25rem',
-                            textDecoration: 'none',
-                          }}
-                        >
-                          {lead.website.replace(/^https?:\/\//, '')} <ExternalLinkIcon size={11} />
-                        </a>
+                      <td>
+                        <div style={{ fontWeight: 700, color: 'var(--text-primary)', fontSize: '0.88rem' }}>
+                          {lead.company_name}
+                        </div>
+                        {lead.website ? (
+                          <a
+                            href={lead.website}
+                            target="_blank"
+                            rel="noreferrer"
+                            className="lead-link"
+                            style={{ fontSize: '0.72rem', marginTop: '0.15rem' }}
+                          >
+                            {lead.website.replace(/^https?:\/\/(www\.)?/, '')} <ExternalLinkIcon size={11} />
+                          </a>
+                        ) : (
+                          <span style={{ fontSize: '0.72rem', color: 'var(--text-muted)' }}>No website</span>
+                        )}
                       </td>
 
-                      <td style={{ padding: '0.65rem 0.75rem', color: 'var(--text-secondary)' }}>
-                        <div style={{ display: 'flex', alignItems: 'center', gap: '0.35rem' }}>
+                      <td>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '0.35rem', fontSize: '0.78rem' }}>
                           <MapPinIcon size={13} color="var(--text-muted)" />
                           {[lead.city, lead.country].filter(Boolean).join(', ') || 'Global / Web'}
                         </div>
                       </td>
 
-                      <td style={{ padding: '0.65rem 0.75rem' }}>
+                      <td>
                         <div style={{ display: 'flex', flexDirection: 'column', gap: '0.2rem' }}>
-                          <span style={{ fontFamily: 'var(--font-mono)', fontSize: '0.78rem', color: lead.email ? 'var(--text-primary)' : 'var(--text-muted)' }}>
+                          <span
+                            style={{
+                              fontFamily: 'var(--font-mono)',
+                              fontSize: '0.78rem',
+                              color: lead.email ? 'var(--text-primary)' : 'var(--text-muted)',
+                            }}
+                          >
                             {lead.email || '(None listed)'}
                           </span>
                           <div>{getVerificationBadge(lead.email_verification_status)}</div>
                         </div>
                       </td>
 
-                      <td style={{ padding: '0.65rem 0.75rem', color: 'var(--text-secondary)', fontFamily: 'var(--font-mono)', fontSize: '0.75rem' }}>
+                      <td>
                         {lead.phone ? (
-                          <div style={{ display: 'flex', alignItems: 'center', gap: '0.3rem' }}>
+                          <div style={{ display: 'flex', alignItems: 'center', gap: '0.3rem', fontFamily: 'var(--font-mono)', fontSize: '0.75rem' }}>
                             <PhoneIcon size={12} color="var(--accent-cyan)" /> {lead.phone}
                           </div>
                         ) : (
-                          <span style={{ color: 'var(--text-muted)' }}>—</span>
+                          <span style={{ color: 'var(--text-muted)', fontSize: '0.75rem' }}>—</span>
                         )}
                       </td>
 
-                      <td style={{ padding: '0.65rem 0.75rem' }}>
-                        <span className="badge badge-cyan" style={{ fontSize: '0.7rem' }}>
-                          {Math.round(lead.relevance_score * 100)}%
+                      <td>
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: '0.2rem', alignItems: 'flex-start' }}>
+                          {getSourceBadge(lead.discovery_source, lead.is_live)}
+                          {lead.source_urls && lead.source_urls.length > 0 && (
+                            <span style={{ fontSize: '0.68rem', color: 'var(--text-muted)', fontFamily: 'var(--font-mono)' }}>
+                              {lead.source_urls.length} verified URL{lead.source_urls.length > 1 ? 's' : ''}
+                            </span>
+                          )}
+                        </div>
+                      </td>
+
+                      <td style={{ textAlign: 'center' }}>
+                        <span
+                          className={`badge ${
+                            relevancePct >= 80 ? 'badge-active' : relevancePct >= 60 ? 'badge-cyan' : 'badge-warning'
+                          }`}
+                          style={{ fontSize: '0.72rem', fontWeight: 700 }}
+                        >
+                          {relevancePct}%
                         </span>
                       </td>
 
-                      <td style={{ padding: '0.65rem 0.75rem', textAlign: 'right' }}>
+                      <td style={{ textAlign: 'right' }}>
                         <button
+                          type="button"
                           className="btn btn-secondary"
                           onClick={() => setEvidenceLead(lead)}
-                          style={{ padding: '0.3rem 0.6rem', fontSize: '0.72rem', display: 'inline-flex', alignItems: 'center', gap: '0.3rem' }}
+                          style={{ padding: '0.3rem 0.65rem', fontSize: '0.74rem', display: 'inline-flex', alignItems: 'center', gap: '0.35rem' }}
+                          title="View verified source evidence and facts"
                         >
                           <EyeIcon size={12} /> Evidence
                         </button>
@@ -877,28 +1238,52 @@ export const LeadDiscovery: React.FC<LeadDiscoveryProps> = ({
         </div>
 
         {/* Pagination Bar */}
-        {totalPages > 1 && (
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: '1rem', paddingTop: '0.75rem', borderTop: '1px solid var(--border-subtle)' }}>
-            <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>
-              Showing {leads.length} of {totalLeads} discovered leads
-            </span>
-            <div style={{ display: 'flex', gap: '0.4rem' }}>
+        {totalLeads > 0 && (
+          <div className="pagination-bar">
+            <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem', fontSize: '0.78rem', color: 'var(--text-muted)' }}>
+              <span>
+                Showing {leads.length} of {totalLeads} discovered leads
+              </span>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '0.35rem' }}>
+                <span>Page size:</span>
+                <select
+                  className="form-select"
+                  value={pageSize}
+                  onChange={(e) => {
+                    setPageSize(parseInt(e.target.value) || 15);
+                    setPage(1);
+                  }}
+                  style={{ padding: '0.25rem 0.5rem', fontSize: '0.75rem', width: '65px' }}
+                >
+                  <option value={10}>10</option>
+                  <option value={15}>15</option>
+                  <option value={25}>25</option>
+                  <option value={50}>50</option>
+                </select>
+              </div>
+            </div>
+
+            <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
               <button
+                type="button"
                 className="btn btn-secondary"
                 disabled={page <= 1}
                 onClick={() => setPage(page - 1)}
-                style={{ padding: '0.3rem 0.6rem' }}
+                style={{ padding: '0.35rem 0.65rem' }}
+                aria-label="Previous page"
               >
                 <ChevronLeftIcon size={14} />
               </button>
-              <span style={{ fontSize: '0.8rem', padding: '0.3rem 0.6rem', color: 'var(--text-secondary)' }}>
+              <span style={{ fontSize: '0.8rem', padding: '0.35rem 0.75rem', color: 'var(--text-secondary)' }}>
                 Page {page} of {totalPages}
               </span>
               <button
+                type="button"
                 className="btn btn-secondary"
                 disabled={page >= totalPages}
                 onClick={() => setPage(page + 1)}
-                style={{ padding: '0.3rem 0.6rem' }}
+                style={{ padding: '0.35rem 0.65rem' }}
+                aria-label="Next page"
               >
                 <ChevronRightIcon size={14} />
               </button>
@@ -907,14 +1292,15 @@ export const LeadDiscovery: React.FC<LeadDiscoveryProps> = ({
         )}
       </div>
 
-      {/* 5. Lead Evidence Modal */}
+      {/* 6. Lead Evidence Modal */}
       {evidenceLead && (
         <div
+          className="modal-overlay"
           style={{
             position: 'fixed',
             inset: 0,
             background: 'rgba(0, 0, 0, 0.75)',
-            backdropFilter: 'blur(4px)',
+            backdropFilter: 'blur(6px)',
             display: 'flex',
             alignItems: 'center',
             justifyContent: 'center',
@@ -924,103 +1310,126 @@ export const LeadDiscovery: React.FC<LeadDiscoveryProps> = ({
           onClick={() => setEvidenceLead(null)}
         >
           <div
-            className="card"
+            className="modal-container"
             style={{
               background: 'var(--bg-secondary)',
               border: '1px solid var(--border-subtle)',
-              borderRadius: '12px',
-              maxWidth: '680px',
+              borderRadius: '14px',
+              maxWidth: '720px',
               width: '100%',
               maxHeight: '90vh',
               overflowY: 'auto',
-              padding: '1.5rem',
+              padding: '1.75rem',
+              boxShadow: '0 8px 32px rgba(0, 0, 0, 0.4)',
             }}
             onClick={(e) => e.stopPropagation()}
           >
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '1rem' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '1.25rem' }}>
               <div>
-                <h3 style={{ fontSize: '1.2rem', fontWeight: 600, color: 'var(--text-primary)', margin: 0 }}>
-                  {evidenceLead.company_name}
-                </h3>
-                <a
-                  href={evidenceLead.website}
-                  target="_blank"
-                  rel="noreferrer"
-                  style={{ fontSize: '0.8rem', color: 'var(--accent-cyan)', textDecoration: 'none', display: 'inline-flex', alignItems: 'center', gap: '0.25rem' }}
-                >
-                  {evidenceLead.website} <ExternalLinkIcon size={12} />
-                </a>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                  <h3 style={{ fontSize: '1.25rem', fontWeight: 700, color: 'var(--text-primary)', margin: 0 }}>
+                    {evidenceLead.company_name}
+                  </h3>
+                  {getSourceBadge(evidenceLead.discovery_source, evidenceLead.is_live)}
+                </div>
+                {evidenceLead.website ? (
+                  <a
+                    href={evidenceLead.website}
+                    target="_blank"
+                    rel="noreferrer"
+                    style={{ fontSize: '0.82rem', color: 'var(--accent-cyan)', textDecoration: 'none', display: 'inline-flex', alignItems: 'center', gap: '0.3rem', marginTop: '0.2rem' }}
+                  >
+                    {evidenceLead.website} <ExternalLinkIcon size={12} />
+                  </a>
+                ) : null}
               </div>
               <button
+                type="button"
                 onClick={() => setEvidenceLead(null)}
-                style={{ background: 'transparent', border: 'none', color: 'var(--text-muted)', cursor: 'pointer' }}
+                style={{ background: 'transparent', border: 'none', color: 'var(--text-muted)', cursor: 'pointer', padding: '0.2rem' }}
+                aria-label="Close evidence"
               >
-                <XIcon size={18} />
+                <XIcon size={20} />
               </button>
             </div>
 
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0.75rem', marginBottom: '1rem' }}>
-              <div style={{ background: 'var(--bg-tertiary)', padding: '0.65rem 0.85rem', borderRadius: '8px' }}>
-                <span style={{ fontSize: '0.7rem', color: 'var(--text-muted)' }}>Discovery Source</span>
-                <div style={{ fontSize: '0.85rem', fontWeight: 600, color: 'var(--text-primary)' }}>
-                  {evidenceLead.discovery_source}
+            {/* Quick Metadata Grid */}
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0.75rem', marginBottom: '1.25rem' }}>
+              <div style={{ background: 'var(--bg-tertiary)', padding: '0.75rem 0.95rem', borderRadius: '8px', border: '1px solid var(--border-subtle)' }}>
+                <span style={{ fontSize: '0.7rem', color: 'var(--text-muted)', fontWeight: 600, textTransform: 'uppercase' }}>Discovery Query Used</span>
+                <div style={{ fontSize: '0.85rem', fontWeight: 600, color: 'var(--text-primary)', marginTop: '0.2rem', fontFamily: 'var(--font-mono)' }}>
+                  &quot;{evidenceLead.discovery_query}&quot;
                 </div>
               </div>
 
-              <div style={{ background: 'var(--bg-tertiary)', padding: '0.65rem 0.85rem', borderRadius: '8px' }}>
-                <span style={{ fontSize: '0.7rem', color: 'var(--text-muted)' }}>Email Verification Status</span>
-                <div style={{ marginTop: '0.2rem' }}>{getVerificationBadge(evidenceLead.email_verification_status)}</div>
+              <div style={{ background: 'var(--bg-tertiary)', padding: '0.75rem 0.95rem', borderRadius: '8px', border: '1px solid var(--border-subtle)' }}>
+                <span style={{ fontSize: '0.7rem', color: 'var(--text-muted)', fontWeight: 600, textTransform: 'uppercase' }}>Public Email Verification</span>
+                <div style={{ marginTop: '0.25rem' }}>{getVerificationBadge(evidenceLead.email_verification_status)}</div>
               </div>
             </div>
 
-            <div style={{ marginBottom: '1rem' }}>
-              <label style={{ fontSize: '0.75rem', fontWeight: 600, color: 'var(--text-muted)', display: 'block', marginBottom: '0.3rem' }}>
-                Relevance Explanation:
+            {/* Relevance Explanation */}
+            <div style={{ marginBottom: '1.25rem' }}>
+              <label style={{ fontSize: '0.76rem', fontWeight: 700, color: 'var(--text-muted)', display: 'block', marginBottom: '0.35rem', textTransform: 'uppercase', letterSpacing: '0.05em' }}>
+                AI Relevance Explanation:
               </label>
-              <div style={{ background: 'var(--bg-tertiary)', padding: '0.65rem 0.85rem', borderRadius: '8px', fontSize: '0.82rem', color: 'var(--text-secondary)' }}>
+              <div style={{ background: 'var(--bg-tertiary)', padding: '0.75rem 1rem', borderRadius: '8px', fontSize: '0.84rem', color: 'var(--text-primary)', lineHeight: 1.5, border: '1px solid var(--border-subtle)' }}>
                 {evidenceLead.relevance_explanation}
               </div>
             </div>
 
-            <div style={{ marginBottom: '1rem' }}>
-              <label style={{ fontSize: '0.75rem', fontWeight: 600, color: 'var(--text-muted)', display: 'block', marginBottom: '0.3rem' }}>
-                Business Description:
+            {/* Business Services Description */}
+            <div style={{ marginBottom: '1.25rem' }}>
+              <label style={{ fontSize: '0.76rem', fontWeight: 700, color: 'var(--text-muted)', display: 'block', marginBottom: '0.35rem', textTransform: 'uppercase', letterSpacing: '0.05em' }}>
+                Public Business & Services Description:
               </label>
-              <div style={{ background: 'var(--bg-tertiary)', padding: '0.65rem 0.85rem', borderRadius: '8px', fontSize: '0.82rem', color: 'var(--text-secondary)' }}>
-                {evidenceLead.services_description || 'No public business description found.'}
+              <div style={{ background: 'var(--bg-tertiary)', padding: '0.75rem 1rem', borderRadius: '8px', fontSize: '0.84rem', color: 'var(--text-secondary)', lineHeight: 1.5, border: '1px solid var(--border-subtle)' }}>
+                {evidenceLead.services_description || 'No public business description extracted.'}
               </div>
             </div>
 
-            <div style={{ marginBottom: '1rem' }}>
-              <label style={{ fontSize: '0.75rem', fontWeight: 600, color: 'var(--text-muted)', display: 'block', marginBottom: '0.3rem' }}>
-                Source URLs (Direct Evidence):
+            {/* Source URLs */}
+            <div style={{ marginBottom: '1.25rem' }}>
+              <label style={{ fontSize: '0.76rem', fontWeight: 700, color: 'var(--text-muted)', display: 'block', marginBottom: '0.35rem', textTransform: 'uppercase', letterSpacing: '0.05em' }}>
+                Direct Source Evidence URLs:
               </label>
-              <ul style={{ margin: 0, paddingLeft: '1.2rem', fontSize: '0.78rem', color: 'var(--accent-cyan)' }}>
-                {evidenceLead.source_urls.map((u, i) => (
-                  <li key={i} style={{ marginBottom: '0.25rem' }}>
-                    <a href={u} target="_blank" rel="noreferrer" style={{ color: 'inherit', textDecoration: 'none' }}>
-                      {u}
-                    </a>
-                  </li>
-                ))}
-              </ul>
+              <div style={{ background: 'var(--bg-tertiary)', padding: '0.75rem 1rem', borderRadius: '8px', border: '1px solid var(--border-subtle)' }}>
+                {evidenceLead.source_urls && evidenceLead.source_urls.length > 0 ? (
+                  <ul style={{ margin: 0, paddingLeft: '1.2rem', fontSize: '0.8rem', color: 'var(--accent-cyan)' }}>
+                    {evidenceLead.source_urls.map((u, i) => (
+                      <li key={i} style={{ marginBottom: '0.35rem', wordBreak: 'break-all' }}>
+                        <a href={u} target="_blank" rel="noreferrer" style={{ color: 'inherit', textDecoration: 'none', display: 'inline-flex', alignItems: 'center', gap: '0.3rem' }}>
+                          {u} <ExternalLinkIcon size={11} />
+                        </a>
+                      </li>
+                    ))}
+                  </ul>
+                ) : (
+                  <span style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>No external source URLs recorded.</span>
+                )}
+              </div>
             </div>
 
+            {/* Confirmed Verified Fields */}
             <div>
-              <label style={{ fontSize: '0.75rem', fontWeight: 600, color: 'var(--text-muted)', display: 'block', marginBottom: '0.3rem' }}>
-                Confirmed Verified Fields:
+              <label style={{ fontSize: '0.76rem', fontWeight: 700, color: 'var(--text-muted)', display: 'block', marginBottom: '0.35rem', textTransform: 'uppercase', letterSpacing: '0.05em' }}>
+                Confirmed Verified Fields on Official Pages:
               </label>
-              <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.35rem' }}>
-                {evidenceLead.verified_fields.map((f, i) => (
-                  <span key={i} className="badge badge-active" style={{ fontSize: '0.68rem' }}>
-                    <CheckIcon size={10} /> {f}
-                  </span>
-                ))}
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.4rem' }}>
+                {evidenceLead.verified_fields && evidenceLead.verified_fields.length > 0 ? (
+                  evidenceLead.verified_fields.map((f, i) => (
+                    <span key={i} className="badge badge-active" style={{ fontSize: '0.72rem' }}>
+                      <CheckIcon size={11} /> {f}
+                    </span>
+                  ))
+                ) : (
+                  <span style={{ fontSize: '0.78rem', color: 'var(--text-muted)' }}>None recorded</span>
+                )}
               </div>
             </div>
 
-            <div style={{ marginTop: '1.5rem', display: 'flex', justifyContent: 'flex-end' }}>
-              <button className="btn btn-secondary" onClick={() => setEvidenceLead(null)}>
+            <div style={{ marginTop: '1.75rem', display: 'flex', justifyContent: 'flex-end' }}>
+              <button type="button" className="btn btn-secondary" onClick={() => setEvidenceLead(null)}>
                 Close Evidence
               </button>
             </div>
@@ -1030,3 +1439,5 @@ export const LeadDiscovery: React.FC<LeadDiscoveryProps> = ({
     </div>
   );
 };
+
+export default LeadDiscovery;

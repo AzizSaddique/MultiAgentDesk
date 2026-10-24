@@ -1,14 +1,14 @@
 import React from 'react';
 import { AgentModel } from '../types/agent';
-import { SearchIcon, LockIcon, PlusIcon, LayersIcon, HistoryIcon } from './icons';
+import { SearchIcon, LockIcon, PlusIcon, LayersIcon, HistoryIcon, CompassIcon } from './icons';
 import { BackendStatus } from '../hooks/useBackendStatus';
 
 interface SidebarProps {
   agents: AgentModel[];
   selectedAgentId: string;
   onSelectAgent: (id: string) => void;
-  activeView: 'agent' | 'environment' | 'history';
-  onSelectView: (view: 'agent' | 'environment' | 'history') => void;
+  activeView: 'agent' | 'discovery' | 'environment' | 'history';
+  onSelectView: (view: 'agent' | 'discovery' | 'environment' | 'history') => void;
   backendStatus?: BackendStatus;
 }
 
@@ -31,6 +31,70 @@ export const Sidebar: React.FC<SidebarProps> = ({
             <span>Desktop Suite</span>
           </div>
         </div>
+      </div>
+
+      {/* Workflows & Primary Engines */}
+      <div className="sidebar-section-title">
+        <span>Autonomous Suite</span>
+        <span className="badge badge-cyan">Engines</span>
+      </div>
+
+      <div style={{ padding: '0 0.75rem', display: 'flex', flexDirection: 'column', gap: '0.45rem', marginBottom: '0.75rem' }}>
+        <button
+          className={`agent-item ${activeView === 'discovery' ? 'selected' : ''}`}
+          onClick={() => onSelectView('discovery')}
+          style={{
+            position: 'relative',
+            background: activeView === 'discovery' ? 'rgba(6, 182, 212, 0.14)' : 'rgba(15, 23, 42, 0.6)',
+            borderColor: activeView === 'discovery' ? 'var(--accent-cyan)' : 'var(--border-subtle)',
+            boxShadow: activeView === 'discovery' ? '0 0 16px rgba(6, 182, 212, 0.18)' : 'none',
+          }}
+          title="Automated Lead Discovery (Autonomous Web & Directory Search)"
+        >
+          <div
+            className="agent-item-icon"
+            style={{
+              background: activeView === 'discovery' ? 'linear-gradient(135deg, rgba(6,182,212,0.35), rgba(59,130,246,0.35))' : 'var(--bg-tertiary)',
+              color: 'var(--accent-cyan)',
+              border: activeView === 'discovery' ? '1px solid rgba(6,182,212,0.5)' : '1px solid transparent',
+            }}
+          >
+            <CompassIcon size={17} color="var(--accent-cyan)" />
+          </div>
+          <div className="agent-item-content">
+            <div className="agent-item-title-row">
+              <span className="agent-item-name" style={{ fontWeight: 700 }}>Lead Discovery</span>
+              <span className="badge badge-active" style={{ fontSize: '0.62rem' }}>
+                <span className="badge-dot" />
+                Live
+              </span>
+            </div>
+            <p className="agent-item-desc">Autonomous Web & Registry Search</p>
+          </div>
+        </button>
+
+        <button
+          className={`agent-item ${activeView === 'history' ? 'selected' : ''}`}
+          onClick={() => onSelectView('history')}
+          style={{
+            background: activeView === 'history' ? 'rgba(6, 182, 212, 0.14)' : 'transparent',
+            borderColor: activeView === 'history' ? 'var(--accent-cyan)' : 'transparent',
+          }}
+          title="Outreach History & Dispatch Audit"
+        >
+          <div className="agent-item-icon">
+            <HistoryIcon size={16} color={activeView === 'history' ? 'var(--accent-cyan)' : 'var(--text-muted)'} />
+          </div>
+          <div className="agent-item-content">
+            <div className="agent-item-title-row">
+              <span className="agent-item-name">Outreach History</span>
+              <span className="badge" style={{ background: 'rgba(148, 163, 184, 0.1)', color: 'var(--text-muted)', fontSize: '0.62rem' }}>
+                Audit
+              </span>
+            </div>
+            <p className="agent-item-desc">Persistent Dispatch Records</p>
+          </div>
+        </button>
       </div>
 
       {/* Agents Section */}
@@ -105,23 +169,14 @@ export const Sidebar: React.FC<SidebarProps> = ({
       {/* Sidebar Footer */}
       <div className="sidebar-footer">
         <button
-          className={`btn btn-secondary ${activeView === 'history' ? 'selected' : ''}`}
+          className={`btn btn-secondary ${activeView === 'environment' ? 'selected' : ''}`}
           style={{
             width: '100%',
             justifyContent: 'flex-start',
             padding: '0.65rem 0.85rem',
-            marginBottom: '0.5rem',
-            background: activeView === 'history' ? 'rgba(6, 182, 212, 0.15)' : undefined,
-            borderColor: activeView === 'history' ? 'var(--accent-cyan)' : undefined,
+            background: activeView === 'environment' ? 'rgba(6, 182, 212, 0.15)' : undefined,
+            borderColor: activeView === 'environment' ? 'var(--accent-cyan)' : undefined,
           }}
-          onClick={() => onSelectView('history')}
-        >
-          <HistoryIcon size={16} color="var(--accent-cyan)" />
-          <span>Outreach History & Audit</span>
-        </button>
-        <button
-          className={`btn btn-secondary ${activeView === 'environment' ? 'selected' : ''}`}
-          style={{ width: '100%', justifyContent: 'flex-start', padding: '0.65rem 0.85rem' }}
           onClick={() => onSelectView('environment')}
         >
           <LayersIcon size={16} color="var(--accent-cyan)" />
@@ -140,5 +195,6 @@ export const Sidebar: React.FC<SidebarProps> = ({
         </div>
       </div>
     </aside>
+
   );
 };

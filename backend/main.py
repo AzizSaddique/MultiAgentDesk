@@ -23,6 +23,10 @@ try:
         OutreachDraftRequest, OutreachDraftResponse,
         SendOutreachRequest, SendOutreachResponse, AIProviderConfig,
         OutreachHistoryItem, OutreachHistoryResponse,
+        DiscoveryPlanRequest, DiscoveryPlan, DiscoveryJobCreateRequest,
+        DiscoveredLeadRecord, DiscoveryJob, DiscoveryJobResponse,
+        DiscoveredLeadsResponse, SearchProviderInfo, SearchProvidersResponse,
+        TransferToOutreachRequest, LeadRecord,
     )
     from .providers.mock import MockResearchProvider
     from .providers.playwright_scraper import PlaywrightResearchProvider
@@ -31,6 +35,8 @@ try:
         dispatch_outreach_email, get_dispatch_status_info, get_dispatch_config,
         DispatchConfigurationError, DispatchDeliveryError, sanitize_log_message,
     )
+    from .providers.search.factory import list_search_providers, get_search_provider
+    from .services.lead_discovery import parse_natural_language_request, global_lead_discovery_service
     from .exporter import generate_leads_csv
     from .env_loader import load_root_env
     from .dispatch_tracker import global_dispatch_tracker
@@ -40,6 +46,10 @@ except (ImportError, ValueError):
         OutreachDraftRequest, OutreachDraftResponse,
         SendOutreachRequest, SendOutreachResponse, AIProviderConfig,
         OutreachHistoryItem, OutreachHistoryResponse,
+        DiscoveryPlanRequest, DiscoveryPlan, DiscoveryJobCreateRequest,
+        DiscoveredLeadRecord, DiscoveryJob, DiscoveryJobResponse,
+        DiscoveredLeadsResponse, SearchProviderInfo, SearchProvidersResponse,
+        TransferToOutreachRequest, LeadRecord,
     )
     from providers.mock import MockResearchProvider
     from providers.playwright_scraper import PlaywrightResearchProvider
@@ -48,6 +58,8 @@ except (ImportError, ValueError):
         dispatch_outreach_email, get_dispatch_status_info, get_dispatch_config,
         DispatchConfigurationError, DispatchDeliveryError, sanitize_log_message,
     )
+    from providers.search.factory import list_search_providers, get_search_provider
+    from services.lead_discovery import parse_natural_language_request, global_lead_discovery_service
     from exporter import generate_leads_csv
     from env_loader import load_root_env
     from dispatch_tracker import global_dispatch_tracker
@@ -600,7 +612,210 @@ def export_outreach_history_csv(
     )
 
 
+# -------------------------------------------------------------------------
+# Automated Lead Discovery Endpoints
+# -------------------------------------------------------------------------
+
+@app.post("/api/discovery/plan", response_model=DiscoveryPlan)
+def generate_discovery_plan(request: DiscoveryPlanRequest):
+    """
+    Parses a natural-language lead generation request into a structured, editable DiscoveryPlan.
+    Detects ambiguity and prompts for clarification if key business domain or location criteria are missing.
+    """
+    prompt_clean = (request.prompt or "").strip()
+    if not prompt_clean:
+        raise HTTPException(status_code=422, detail="Prompt must not be empty.")
+
+    plan = parse_natural_language_request(prompt_clean, request.ai_config)
+    return plan
+
+
+@app.get("/api/discovery/providers", response_model=SearchProvidersResponse)
+def get_discovery_providers():
+    """
+    Returns the configuration status and description of all supported search sources:
+    Tavily Search API, Google Custom Search, Bing Web Search, and Public Business Directory.
+    """
+    providers = list_search_providers()
+    return SearchProvidersResponse(providers=providers)
+
+
+@app.post("/api/discovery/jobs", response_model=DiscoveryJob)
+async def create_discovery_job(request: DiscoveryJobCreateRequest):
+    """
+    Creates and initiates a background automated lead discovery job.
+    """
+    if not request.plan.industry and not request.plan.keywords:
+        raise HTTPException(status_code=422, detail="Plan must specify an industry or business keywords.")
+
+    job = await global_lead_discovery_service.start_job(request)
+    return job
+
+
+@app.get("/api/discovery/jobs/{job_id}", response_model=DiscoveryJobResponse)
+def get_discovery_job(job_id: str):
+    """
+    Retrieves discovery job status, telemetry metrics, and the latest discovered leads.
+    """
+    job_dict = global_dispatch_tracker.get_discovery_job(job_id)
+    if not job_dict:
+        raise HTTPException(status_code=404, detail=f"Discovery job '{job_id}' not found.")
+
+    leads_list, _, _, _ = global_dispatch_tracker.query_discovered_leads(
+        job_id=job_id,
+        page=1,
+        page_size=100,
+    )
+
+    job = DiscoveryJob(**job_dict)
+    leads = [DiscoveredLeadRecord(**item) for item in leads_list]
+    return DiscoveryJobResponse(job=job, leads=leads)
+
+
+@app.post("/api/discovery/jobs/{job_id}/cancel")
+def cancel_discovery_job(job_id: str):
+    """
+    Cooperatively stops the background discovery pipeline for the specified job.
+    """
+    cancelled = global_lead_discovery_service.cancel_job(job_id)
+    if not cancelled:
+        raise HTTPException(status_code=404, detail=f"Discovery job '{job_id}' not found.")
+
+    job_dict = global_dispatch_tracker.get_discovery_job(job_id)
+    return DiscoveryJob(**job_dict)
+
+
+@app.get("/api/discovery/jobs/{job_id}/leads", response_model=DiscoveredLeadsResponse)
+def list_discovered_leads(
+    job_id: str,
+    page: int = 1,
+    page_size: int = 25,
+    search: Optional[str] = None,
+    country: Optional[str] = None,
+    city: Optional[str] = None,
+    category: Optional[str] = None,
+    email_status: Optional[str] = None,
+    sort_by: Optional[str] = "discovered_at",
+    sort_order: Optional[str] = "desc",
+):
+    """
+    Returns paginated, searchable, and filtered leads discovered by a job,
+    including verification breakdown counts.
+    """
+    job_dict = global_dispatch_tracker.get_discovery_job(job_id)
+    if not job_dict:
+        raise HTTPException(status_code=404, detail=f"Discovery job '{job_id}' not found.")
+
+    leads_list, total_count, total_pages, counts = global_dispatch_tracker.query_discovered_leads(
+        job_id=job_id,
+        search=search,
+        country=country,
+        city=city,
+        category=category,
+        email_status=email_status,
+        sort_by=sort_by,
+        sort_order=sort_order,
+        page=page,
+        page_size=page_size,
+    )
+
+    return DiscoveredLeadsResponse(
+        leads=[DiscoveredLeadRecord(**item) for item in leads_list],
+        total=total_count,
+        page=page,
+        page_size=page_size,
+        total_pages=total_pages,
+        verification_counts=counts,
+    )
+
+
+@app.get("/api/discovery/jobs/{job_id}/export-csv")
+def export_discovered_leads_csv(
+    job_id: str,
+    search: Optional[str] = None,
+    email_status: Optional[str] = None,
+):
+    """
+    Exports discovered leads for a job to an RFC 4180 CSV file stream.
+    """
+    job_dict = global_dispatch_tracker.get_discovery_job(job_id)
+    if not job_dict:
+        raise HTTPException(status_code=404, detail=f"Discovery job '{job_id}' not found.")
+
+    csv_content = global_dispatch_tracker.export_discovered_leads_csv(
+        job_id=job_id,
+        search=search,
+        email_status=email_status,
+    )
+    filename = f"agentdesk_discovered_leads_{job_id}.csv"
+    return Response(
+        content=csv_content,
+        media_type="text/csv",
+        headers={
+            "Content-Disposition": f"attachment; filename={filename}"
+        }
+    )
+
+
+@app.post("/api/discovery/transfer-outreach", response_model=OutreachDraftResponse)
+async def transfer_leads_to_outreach(request: TransferToOutreachRequest):
+    """
+    Converts selected discovered leads into Outreach drafts and registers them in the
+    outreach drafting workflow. Preserves strict public email verification rules.
+    """
+    if not request.lead_ids:
+        raise HTTPException(status_code=422, detail="No lead IDs provided for outreach transfer.")
+
+    llm_provider = get_llm_provider(None)
+    drafts = []
+    verified_count = 0
+    missing_count = 0
+
+    for lead_id in request.lead_ids:
+        lead_data = global_dispatch_tracker.get_discovered_lead(lead_id)
+        if not lead_data:
+            continue
+
+        has_verified_email = (lead_data.get("email_verification_status") == "verified_public")
+        public_email = lead_data.get("email") if has_verified_email else "(No public email listed)"
+
+        lead_obj = LeadRecord(
+            id=f"disc-{lead_data['id']}",
+            company_name=lead_data["company_name"],
+            contact_name="",
+            contact_role="",
+            email=public_email,
+            website=lead_data["website"],
+            industry=lead_data["industry"],
+            location=f"{lead_data['city']}, {lead_data['country']}".strip(", "),
+            source_url=lead_data["website"],
+            description=lead_data.get("services_description", ""),
+            verified_fields=lead_data.get("verified_fields", []),
+            is_live=True,
+        )
+
+        draft = await llm_provider.draft_lead_outreach(
+            lead=lead_obj,
+            service_offering=lead_data.get("services_description") or "Commercial Partnership",
+        )
+
+        DRAFT_REGISTRY[draft.id] = draft
+        _persist_draft(draft)
+        drafts.append(draft)
+
+        if draft.has_verified_email:
+            verified_count += 1
+        else:
+            missing_count += 1
+
+    return OutreachDraftResponse(
+        drafts=drafts,
+        total=len(drafts),
+        verified_email_count=verified_count,
+        missing_email_count=missing_count,
+        provider_used=llm_provider.display_name,
+    )
+
+
 if __name__ == "__main__":
     uvicorn.run("backend.main:app" if __package__ else "main:app", host="127.0.0.1", port=8000, loop="none")
-
-

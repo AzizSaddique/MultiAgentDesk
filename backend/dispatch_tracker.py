@@ -104,7 +104,63 @@ class DispatchTracker:
                 conn.execute("CREATE INDEX IF NOT EXISTS idx_history_status ON outreach_history(status)")
                 conn.execute("CREATE INDEX IF NOT EXISTS idx_history_draft_id ON outreach_history(draft_id)")
 
-                # 3. Backfill any legacy dispatched_records into outreach_history
+                # 3. Discovery Jobs table
+                conn.execute("""
+                    CREATE TABLE IF NOT EXISTS discovery_jobs (
+                        id TEXT PRIMARY KEY,
+                        prompt TEXT NOT NULL,
+                        status TEXT NOT NULL,
+                        created_at TEXT NOT NULL,
+                        started_at TEXT,
+                        completed_at TEXT,
+                        provider_used TEXT NOT NULL,
+                        total_target INTEGER NOT NULL,
+                        discovered_count INTEGER NOT NULL DEFAULT 0,
+                        verified_email_count INTEGER NOT NULL DEFAULT 0,
+                        duplicate_count INTEGER NOT NULL DEFAULT 0,
+                        skipped_count INTEGER NOT NULL DEFAULT 0,
+                        failed_count INTEGER NOT NULL DEFAULT 0,
+                        progress_percent INTEGER NOT NULL DEFAULT 0,
+                        current_stage TEXT,
+                        plan_json TEXT,
+                        error_message TEXT
+                    )
+                """)
+                conn.execute("CREATE INDEX IF NOT EXISTS idx_disc_jobs_created ON discovery_jobs(created_at DESC)")
+                conn.execute("CREATE INDEX IF NOT EXISTS idx_disc_jobs_status ON discovery_jobs(status)")
+
+                # 4. Discovered Leads table
+                conn.execute("""
+                    CREATE TABLE IF NOT EXISTS discovered_leads (
+                        id TEXT PRIMARY KEY,
+                        job_id TEXT NOT NULL,
+                        company_name TEXT NOT NULL,
+                        website TEXT NOT NULL,
+                        industry TEXT,
+                        city TEXT,
+                        country TEXT,
+                        services_description TEXT,
+                        email TEXT,
+                        email_verification_status TEXT NOT NULL,
+                        phone TEXT,
+                        phone_verification_status TEXT NOT NULL,
+                        source_urls TEXT NOT NULL,
+                        discovery_source TEXT NOT NULL,
+                        discovery_query TEXT NOT NULL,
+                        discovered_at TEXT NOT NULL,
+                        relevance_score REAL NOT NULL,
+                        relevance_explanation TEXT NOT NULL,
+                        research_status TEXT NOT NULL,
+                        failure_reason TEXT,
+                        verified_fields TEXT NOT NULL,
+                        is_live INTEGER NOT NULL DEFAULT 1,
+                        FOREIGN KEY (job_id) REFERENCES discovery_jobs(id)
+                    )
+                """)
+                conn.execute("CREATE INDEX IF NOT EXISTS idx_disc_leads_job ON discovered_leads(job_id)")
+                conn.execute("CREATE INDEX IF NOT EXISTS idx_disc_leads_email_stat ON discovered_leads(email_verification_status)")
+
+                # 5. Backfill any legacy dispatched_records into outreach_history
                 conn.execute("""
                     INSERT OR IGNORE INTO outreach_history
                     (id, draft_id, recipient_email, recipient_name, company_name, subject, body_preview, source_url, status, provider, is_simulated, dispatched_at, error_message)
@@ -503,6 +559,405 @@ class DispatchTracker:
 
         return "\r\n".join(rows)
 
+    # -------------------------------------------------------------------------
+    # Automated Lead Discovery Jobs & Leads Persistence
+    # -------------------------------------------------------------------------
+    def save_discovery_job(self, job: Any) -> None:
+        if not self._db_path:
+            return
+        job_data = job.model_dump() if hasattr(job, "model_dump") else dict(job)
+        with self._lock:
+            try:
+                with sqlite3.connect(self._db_path, timeout=5.0) as conn:
+                    conn.execute("""
+                        INSERT OR REPLACE INTO discovery_jobs
+                        (id, prompt, status, created_at, started_at, completed_at, provider_used,
+                         total_target, discovered_count, verified_email_count, duplicate_count,
+                         skipped_count, failed_count, progress_percent, current_stage, plan_json, error_message)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """, (
+                        job_data["id"], job_data["prompt"], job_data["status"], job_data["created_at"],
+                        job_data.get("started_at"), job_data.get("completed_at"), job_data.get("provider_used", "auto"),
+                        job_data.get("total_target", 25), job_data.get("discovered_count", 0),
+                        job_data.get("verified_email_count", 0), job_data.get("duplicate_count", 0),
+                        job_data.get("skipped_count", 0), job_data.get("failed_count", 0),
+                        job_data.get("progress_percent", 0), job_data.get("current_stage", "Queued"),
+                        job_data.get("plan_json", ""), job_data.get("error_message")
+                    ))
+                    conn.commit()
+            except Exception:
+                pass
+
+    def update_discovery_job(self, job_id: str, updates: Optional[Dict[str, Any]] = None, **kwargs) -> None:
+        if not self._db_path:
+            return
+        all_updates = dict(updates or {})
+        all_updates.update(kwargs)
+        if not all_updates:
+            return
+        with self._lock:
+            try:
+                set_clauses = [f"{k} = ?" for k in all_updates.keys()]
+                values = list(all_updates.values()) + [job_id]
+                sql = f"UPDATE discovery_jobs SET {', '.join(set_clauses)} WHERE id = ?"
+                with sqlite3.connect(self._db_path, timeout=5.0) as conn:
+                    conn.execute(sql, values)
+                    conn.commit()
+            except Exception:
+                pass
+
+    def get_discovery_job(self, job_id: str) -> Optional[Dict[str, Any]]:
+        if not self._db_path:
+            return None
+        with self._lock:
+            try:
+                with sqlite3.connect(self._db_path, timeout=5.0) as conn:
+                    cur = conn.execute("""
+                        SELECT id, prompt, status, created_at, started_at, completed_at, provider_used,
+                               total_target, discovered_count, verified_email_count, duplicate_count,
+                               skipped_count, failed_count, progress_percent, current_stage, plan_json, error_message
+                        FROM discovery_jobs WHERE id = ?
+                    """, (job_id,))
+                    row = cur.fetchone()
+                    if not row:
+                        return None
+                    return {
+                        "id": row[0],
+                        "prompt": row[1],
+                        "status": row[2],
+                        "created_at": row[3],
+                        "started_at": row[4],
+                        "completed_at": row[5],
+                        "provider_used": row[6],
+                        "total_target": row[7],
+                        "discovered_count": row[8],
+                        "verified_email_count": row[9],
+                        "duplicate_count": row[10],
+                        "skipped_count": row[11],
+                        "failed_count": row[12],
+                        "progress_percent": row[13],
+                        "current_stage": row[14],
+                        "plan_json": row[15],
+                        "error_message": row[16],
+                    }
+            except Exception:
+                return None
+
+    def list_discovery_jobs(self, limit: int = 50) -> List[Dict[str, Any]]:
+        if not self._db_path:
+            return []
+        with self._lock:
+            try:
+                with sqlite3.connect(self._db_path, timeout=5.0) as conn:
+                    cur = conn.execute("""
+                        SELECT id, prompt, status, created_at, started_at, completed_at, provider_used,
+                               total_target, discovered_count, verified_email_count, duplicate_count,
+                               skipped_count, failed_count, progress_percent, current_stage, plan_json, error_message
+                        FROM discovery_jobs
+                        ORDER BY created_at DESC
+                        LIMIT ?
+                    """, (limit,))
+                    jobs = []
+                    for row in cur.fetchall():
+                        jobs.append({
+                            "id": row[0],
+                            "prompt": row[1],
+                            "status": row[2],
+                            "created_at": row[3],
+                            "started_at": row[4],
+                            "completed_at": row[5],
+                            "provider_used": row[6],
+                            "total_target": row[7],
+                            "discovered_count": row[8],
+                            "verified_email_count": row[9],
+                            "duplicate_count": row[10],
+                            "skipped_count": row[11],
+                            "failed_count": row[12],
+                            "progress_percent": row[13],
+                            "current_stage": row[14],
+                            "plan_json": row[15],
+                            "error_message": row[16],
+                        })
+                    return jobs
+            except Exception:
+                return []
+
+    def save_discovered_lead(self, lead: Any) -> None:
+        if not self._db_path:
+            return
+        lead_data = lead.model_dump() if hasattr(lead, "model_dump") else dict(lead)
+        with self._lock:
+            try:
+                import json
+                source_urls_json = json.dumps(lead_data.get("source_urls", []))
+                verified_fields_json = json.dumps(lead_data.get("verified_fields", []))
+
+                with sqlite3.connect(self._db_path, timeout=5.0) as conn:
+                    conn.execute("""
+                        INSERT OR REPLACE INTO discovered_leads
+                        (id, job_id, company_name, website, industry, city, country,
+                         services_description, email, email_verification_status, phone,
+                         phone_verification_status, source_urls, discovery_source, discovery_query,
+                         discovered_at, relevance_score, relevance_explanation, research_status,
+                         failure_reason, verified_fields, is_live)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """, (
+                        lead_data["id"], lead_data["job_id"], lead_data["company_name"], lead_data["website"],
+                        lead_data.get("industry", ""), lead_data.get("city", ""), lead_data.get("country", ""),
+                        lead_data.get("services_description", ""), lead_data.get("email", ""),
+                        lead_data.get("email_verification_status", "not_found"), lead_data.get("phone", ""),
+                        lead_data.get("phone_verification_status", "not_found"), source_urls_json,
+                        lead_data.get("discovery_source", "search"), lead_data.get("discovery_query", ""),
+                        lead_data["discovered_at"], lead_data.get("relevance_score", 0.8),
+                        lead_data.get("relevance_explanation", ""), lead_data.get("research_status", "completed"),
+                        lead_data.get("failure_reason"), verified_fields_json,
+                        1 if lead_data.get("is_live", True) else 0
+                    ))
+                    conn.commit()
+            except Exception:
+                pass
+
+    def query_discovered_leads(
+        self,
+        job_id: str,
+        search: Optional[str] = None,
+        country: Optional[str] = None,
+        city: Optional[str] = None,
+        category: Optional[str] = None,
+        email_status: Optional[str] = None,
+        research_status: Optional[str] = None,
+        sort_by: Optional[str] = "discovered_at",
+        sort_order: Optional[str] = "desc",
+        page: int = 1,
+        page_size: int = 25,
+        **kwargs,
+    ) -> Tuple[List[Dict[str, Any]], int, int, Dict[str, int]]:
+        default_counts = {"all": 0, "verified_public": 0, "found_unverified": 0, "not_found": 0, "invalid": 0}
+        if not self._db_path:
+            return [], 0, 0, default_counts
+
+        with self._lock:
+            try:
+                import json
+                with sqlite3.connect(self._db_path, timeout=5.0) as conn:
+                    # 1. Verification counts for this job
+                    cur = conn.execute(
+                        "SELECT email_verification_status, COUNT(*) FROM discovered_leads WHERE job_id = ? GROUP BY email_verification_status",
+                        (job_id,)
+                    )
+                    counts = dict(default_counts)
+                    for row in cur.fetchall():
+                        counts[row[0]] = row[1]
+                    counts["all"] = sum(v for k, v in counts.items() if k != "all")
+
+                    # 2. Filter clauses
+                    where_clauses = ["job_id = ?"]
+                    params = [job_id]
+
+                    if email_status and email_status.strip().lower() not in ("all", ""):
+                        where_clauses.append("email_verification_status = ?")
+                        params.append(email_status.strip().lower())
+
+                    if research_status and research_status.strip().lower() not in ("all", ""):
+                        where_clauses.append("research_status = ?")
+                        params.append(research_status.strip().lower())
+
+                    if country and country.strip():
+                        where_clauses.append("LOWER(country) = ?")
+                        params.append(country.strip().lower())
+
+                    if city and city.strip():
+                        where_clauses.append("LOWER(city) = ?")
+                        params.append(city.strip().lower())
+
+                    if category and category.strip():
+                        where_clauses.append("LOWER(industry) LIKE ?")
+                        params.append(f"%{category.strip().lower()}%")
+
+                    if search and search.strip():
+                        st = f"%{search.strip().lower()}%"
+                        where_clauses.append("(LOWER(company_name) LIKE ? OR LOWER(website) LIKE ? OR LOWER(services_description) LIKE ? OR LOWER(email) LIKE ? OR LOWER(city) LIKE ?)")
+                        params.extend([st, st, st, st, st])
+
+                    where_sql = " WHERE " + " AND ".join(where_clauses)
+
+                    # Total matching
+                    cur = conn.execute(f"SELECT COUNT(*) FROM discovered_leads{where_sql}", params)
+                    total_count = cur.fetchone()[0]
+
+                    # Pagination
+                    page_num = max(1, page)
+                    limit = max(1, min(100, page_size))
+                    offset = (page_num - 1) * limit
+                    total_pages = max(1, (total_count + limit - 1) // limit) if total_count > 0 else 0
+
+                    cur = conn.execute(f"""
+                        SELECT id, job_id, company_name, website, industry, city, country,
+                               services_description, email, email_verification_status, phone,
+                               phone_verification_status, source_urls, discovery_source, discovery_query,
+                               discovered_at, relevance_score, relevance_explanation, research_status,
+                               failure_reason, verified_fields, is_live
+                        FROM discovered_leads
+                        {where_sql}
+                        ORDER BY relevance_score DESC, discovered_at DESC
+                        LIMIT ? OFFSET ?
+                    """, params + [limit, offset])
+
+                    leads = []
+                    for row in cur.fetchall():
+                        try:
+                            s_urls = json.loads(row[12]) if row[12] else []
+                        except Exception:
+                            s_urls = []
+                        try:
+                            v_fields = json.loads(row[20]) if row[20] else []
+                        except Exception:
+                            v_fields = []
+
+                        leads.append({
+                            "id": row[0],
+                            "job_id": row[1],
+                            "company_name": row[2],
+                            "website": row[3],
+                            "industry": row[4] or "",
+                            "city": row[5] or "",
+                            "country": row[6] or "",
+                            "services_description": row[7] or "",
+                            "email": row[8] or "",
+                            "email_verification_status": row[9],
+                            "phone": row[10] or "",
+                            "phone_verification_status": row[11],
+                            "source_urls": s_urls,
+                            "discovery_source": row[13],
+                            "discovery_query": row[14],
+                            "discovered_at": row[15],
+                            "relevance_score": float(row[16]),
+                            "relevance_explanation": row[17] or "",
+                            "research_status": row[18],
+                            "failure_reason": row[19],
+                            "verified_fields": v_fields,
+                            "is_live": bool(row[21]),
+                        })
+
+                    return leads, total_count, total_pages, counts
+            except Exception:
+                return [], 0, 0, default_counts
+
+    def get_discovered_lead(self, lead_id: str) -> Optional[Dict[str, Any]]:
+        if not self._db_path:
+            return None
+        with self._lock:
+            try:
+                import json
+                with sqlite3.connect(self._db_path, timeout=5.0) as conn:
+                    cur = conn.execute("""
+                        SELECT id, job_id, company_name, website, industry, city, country,
+                               services_description, email, email_verification_status, phone,
+                               phone_verification_status, source_urls, discovery_source, discovery_query,
+                               discovered_at, relevance_score, relevance_explanation, research_status,
+                               failure_reason, verified_fields, is_live
+                        FROM discovered_leads WHERE id = ?
+                    """, (lead_id,))
+                    row = cur.fetchone()
+                    if not row:
+                        return None
+                    try:
+                        s_urls = json.loads(row[12]) if row[12] else []
+                    except Exception:
+                        s_urls = []
+                    try:
+                        v_fields = json.loads(row[20]) if row[20] else []
+                    except Exception:
+                        v_fields = []
+                    return {
+                        "id": row[0],
+                        "job_id": row[1],
+                        "company_name": row[2],
+                        "website": row[3],
+                        "industry": row[4] or "",
+                        "city": row[5] or "",
+                        "country": row[6] or "",
+                        "services_description": row[7] or "",
+                        "email": row[8] or "",
+                        "email_verification_status": row[9],
+                        "phone": row[10] or "",
+                        "phone_verification_status": row[11],
+                        "source_urls": s_urls,
+                        "discovery_source": row[13],
+                        "discovery_query": row[14],
+                        "discovered_at": row[15],
+                        "relevance_score": float(row[16]),
+                        "relevance_explanation": row[17] or "",
+                        "research_status": row[18],
+                        "failure_reason": row[19],
+                        "verified_fields": v_fields,
+                        "is_live": bool(row[21]),
+                    }
+            except Exception:
+                return None
+
+    def export_discovered_leads_csv(
+        self,
+        job_id: str,
+        search: Optional[str] = None,
+        email_status: Optional[str] = None,
+    ) -> str:
+        leads, _, _, _ = self.query_discovered_leads(
+            job_id=job_id,
+            search=search,
+            email_status=email_status,
+            page=1,
+            page_size=10000,
+        )
+
+        headers = [
+            "Lead ID",
+            "Company Name",
+            "Website",
+            "Industry",
+            "City",
+            "Country",
+            "Business Description",
+            "Public Email",
+            "Email Verification Status",
+            "Phone",
+            "Phone Verification Status",
+            "Relevance Score",
+            "Relevance Explanation",
+            "Discovery Source",
+            "Discovered At (UTC)",
+            "Source URLs",
+        ]
+
+        def escape_csv(val: str) -> str:
+            clean = (val or "").replace('"', '""')
+            return f'"{clean}"'
+
+        rows = [",".join(headers)]
+        for item in leads:
+            urls_str = "; ".join(item.get("source_urls", []))
+            row_data = [
+                escape_csv(item["id"]),
+                escape_csv(item["company_name"]),
+                escape_csv(item["website"]),
+                escape_csv(item["industry"]),
+                escape_csv(item["city"]),
+                escape_csv(item["country"]),
+                escape_csv(item["services_description"]),
+                escape_csv(item["email"]),
+                escape_csv(item["email_verification_status"]),
+                escape_csv(item["phone"]),
+                escape_csv(item["phone_verification_status"]),
+                escape_csv(f"{item['relevance_score']:.2f}"),
+                escape_csv(item["relevance_explanation"]),
+                escape_csv(item["discovery_source"]),
+                escape_csv(item["discovered_at"]),
+                escape_csv(urls_str),
+            ]
+            rows.append(",".join(row_data))
+
+        return "\r\n".join(rows)
+
     def is_dispatched(self, draft_id: str) -> bool:
         with self._lock:
             return draft_id in self._by_draft_id
@@ -523,6 +978,8 @@ class DispatchTracker:
                     with sqlite3.connect(self._db_path, timeout=5.0) as conn:
                         conn.execute("DELETE FROM dispatched_records")
                         conn.execute("DELETE FROM outreach_history")
+                        conn.execute("DELETE FROM discovery_jobs")
+                        conn.execute("DELETE FROM discovered_leads")
                         conn.commit()
                 except Exception:
                     pass

@@ -9,6 +9,12 @@ import {
   ProvidersResponse,
   OutreachHistoryResponse,
   HistoryFilterParams,
+  DiscoveryPlan,
+  DiscoveryJob,
+  DiscoveryJobResponse,
+  DiscoveredLeadsResponse,
+  SearchProvidersResponse,
+  AIProviderConfig,
 } from '../types/agent';
 
 export interface HealthResponse {
@@ -374,4 +380,243 @@ export async function downloadHistoryCsv(params: HistoryFilterParams = {}): Prom
   link.click();
   document.body.removeChild(link);
   URL.revokeObjectURL(url);
+}
+
+/**
+ * Parses natural-language prompt into structured DiscoveryPlan with clarification check.
+ */
+export async function generateDiscoveryPlan(
+  prompt: string,
+  aiConfig?: AIProviderConfig
+): Promise<DiscoveryPlan> {
+  const response = await fetch(`${BACKEND_BASE_URL}/api/discovery/plan`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Accept': 'application/json',
+    },
+    body: JSON.stringify({ prompt, ai_config: aiConfig }),
+  });
+
+  if (!response.ok) {
+    let detail = `Failed to generate discovery plan (${response.status})`;
+    try {
+      const err = await response.json();
+      if (err.detail) detail = String(err.detail);
+    } catch {
+      // fallback
+    }
+    throw new Error(detail);
+  }
+
+  return await response.json();
+}
+
+/**
+ * Fetches availability and configuration status of supported search sources.
+ */
+export async function fetchSearchProviders(): Promise<SearchProvidersResponse> {
+  const response = await fetch(`${BACKEND_BASE_URL}/api/discovery/providers`, {
+    method: 'GET',
+    headers: {
+      'Accept': 'application/json',
+    },
+  });
+
+  if (!response.ok) {
+    throw new Error(`Failed to fetch search providers (${response.status})`);
+  }
+
+  return await response.json();
+}
+
+/**
+ * Creates and starts a background discovery job.
+ */
+export async function createDiscoveryJob(
+  plan: DiscoveryPlan,
+  searchProvider: string = 'auto',
+  aiConfig?: AIProviderConfig
+): Promise<DiscoveryJob> {
+  const response = await fetch(`${BACKEND_BASE_URL}/api/discovery/jobs`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Accept': 'application/json',
+    },
+    body: JSON.stringify({
+      plan,
+      search_provider: searchProvider,
+      ai_config: aiConfig,
+    }),
+  });
+
+  if (!response.ok) {
+    let detail = `Failed to start discovery job (${response.status})`;
+    try {
+      const err = await response.json();
+      if (err.detail) detail = String(err.detail);
+    } catch {
+      // fallback
+    }
+    throw new Error(detail);
+  }
+
+  return await response.json();
+}
+
+/**
+ * Retrieves the current status, progress telemetry, and recent leads of a discovery job.
+ */
+export async function fetchDiscoveryJob(jobId: string): Promise<DiscoveryJobResponse> {
+  const response = await fetch(`${BACKEND_BASE_URL}/api/discovery/jobs/${encodeURIComponent(jobId)}`, {
+    method: 'GET',
+    headers: {
+      'Accept': 'application/json',
+    },
+  });
+
+  if (!response.ok) {
+    throw new Error(`Failed to fetch discovery job (${response.status})`);
+  }
+
+  return await response.json();
+}
+
+/**
+ * Cooperatively cancels a running discovery job.
+ */
+export async function cancelDiscoveryJob(jobId: string): Promise<DiscoveryJob> {
+  const response = await fetch(`${BACKEND_BASE_URL}/api/discovery/jobs/${encodeURIComponent(jobId)}/cancel`, {
+    method: 'POST',
+    headers: {
+      'Accept': 'application/json',
+    },
+  });
+
+  if (!response.ok) {
+    throw new Error(`Failed to cancel discovery job (${response.status})`);
+  }
+
+  return await response.json();
+}
+
+/**
+ * Fetches paginated, searchable, and filtered leads discovered by a job.
+ */
+export async function fetchDiscoveredLeads(
+  jobId: string,
+  params: {
+    page?: number;
+    pageSize?: number;
+    search?: string;
+    country?: string;
+    city?: string;
+    category?: string;
+    emailStatus?: string;
+    sortBy?: string;
+    sortOrder?: string;
+  } = {}
+): Promise<DiscoveredLeadsResponse> {
+  const queryParts: string[] = [];
+  if (params.page) queryParts.push(`page=${params.page}`);
+  if (params.pageSize) queryParts.push(`page_size=${params.pageSize}`);
+  if (params.search) queryParts.push(`search=${encodeURIComponent(params.search)}`);
+  if (params.country) queryParts.push(`country=${encodeURIComponent(params.country)}`);
+  if (params.city) queryParts.push(`city=${encodeURIComponent(params.city)}`);
+  if (params.category) queryParts.push(`category=${encodeURIComponent(params.category)}`);
+  if (params.emailStatus) queryParts.push(`email_status=${encodeURIComponent(params.emailStatus)}`);
+  if (params.sortBy) queryParts.push(`sort_by=${encodeURIComponent(params.sortBy)}`);
+  if (params.sortOrder) queryParts.push(`sort_order=${encodeURIComponent(params.sortOrder)}`);
+
+  const queryString = queryParts.length > 0 ? `?${queryParts.join('&')}` : '';
+
+  const response = await fetch(
+    `${BACKEND_BASE_URL}/api/discovery/jobs/${encodeURIComponent(jobId)}/leads${queryString}`,
+    {
+      method: 'GET',
+      headers: {
+        'Accept': 'application/json',
+      },
+    }
+  );
+
+  if (!response.ok) {
+    throw new Error(`Failed to fetch discovered leads (${response.status})`);
+  }
+
+  return await response.json();
+}
+
+/**
+ * Downloads discovered leads as RFC 4180 CSV.
+ */
+export async function downloadDiscoveredLeadsCsv(
+  jobId: string,
+  search?: string,
+  emailStatus?: string
+): Promise<void> {
+  const queryParts: string[] = [];
+  if (search) queryParts.push(`search=${encodeURIComponent(search)}`);
+  if (emailStatus) queryParts.push(`email_status=${encodeURIComponent(emailStatus)}`);
+
+  const queryString = queryParts.length > 0 ? `?${queryParts.join('&')}` : '';
+
+  const response = await fetch(
+    `${BACKEND_BASE_URL}/api/discovery/jobs/${encodeURIComponent(jobId)}/export-csv${queryString}`,
+    {
+      method: 'GET',
+      headers: {
+        'Accept': 'text/csv',
+      },
+    }
+  );
+
+  if (!response.ok) {
+    throw new Error(`Failed to export discovered leads CSV (${response.status})`);
+  }
+
+  const csvContent = await response.text();
+  const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.href = url;
+  link.setAttribute('download', `discovered_leads_${jobId}.csv`);
+  document.body.appendChild(link);
+  link.click();
+  document.body.removeChild(link);
+  URL.revokeObjectURL(url);
+}
+
+/**
+ * Transfers selected discovered leads to the existing outreach drafting workflow.
+ */
+export async function transferLeadsToOutreach(
+  jobId: string,
+  leadIds: string[]
+): Promise<OutreachDraftResponse> {
+  const response = await fetch(`${BACKEND_BASE_URL}/api/discovery/transfer-outreach`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Accept': 'application/json',
+    },
+    body: JSON.stringify({
+      job_id: jobId,
+      lead_ids: leadIds,
+    }),
+  });
+
+  if (!response.ok) {
+    let detail = `Failed to transfer leads to outreach (${response.status})`;
+    try {
+      const err = await response.json();
+      if (err.detail) detail = String(err.detail);
+    } catch {
+      // fallback
+    }
+    throw new Error(detail);
+  }
+
+  return await response.json();
 }

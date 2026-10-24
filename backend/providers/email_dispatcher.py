@@ -68,6 +68,8 @@ def sanitize_log_message(text: str, custom_secrets: Optional[list] = None) -> st
     text = re.sub(r're_[a-zA-Z0-9_\-]+', '[REDACTED_API_KEY]', text)
     # Mask OpenAI / Bearer keys
     text = re.sub(r'sk-[a-zA-Z0-9_\-]+', '[REDACTED_API_KEY]', text)
+    # Mask Tavily API keys
+    text = re.sub(r'tvly-[a-zA-Z0-9_\-]+', '[REDACTED_API_KEY]', text)
     # Mask password parameter patterns
     text = re.sub(r'(password|passwd|pwd|secret)=([^\s,;]+)', r'\1=[REDACTED]', text, flags=re.IGNORECASE)
     # Mask auth headers

@@ -4,7 +4,7 @@ import { TerminalIcon, ShieldAlertIcon } from './icons';
 import { BackendStatus } from '../hooks/useBackendStatus';
 
 interface HeaderProps {
-  activeView: 'agent' | 'environment' | 'history';
+  activeView: 'agent' | 'discovery' | 'environment' | 'history';
   currentAgent?: AgentModel;
   backendStatus?: BackendStatus;
 }
@@ -15,6 +15,8 @@ export const Header: React.FC<HeaderProps> = ({ activeView, currentAgent, backen
   const headerTitle =
     activeView === 'agent'
       ? currentAgent?.name
+      : activeView === 'discovery'
+      ? 'Automated Lead Discovery Agent'
       : activeView === 'environment'
       ? 'Prerequisite & Environment Verification'
       : 'Outreach History & Dispatch Audit';
@@ -29,6 +31,12 @@ export const Header: React.FC<HeaderProps> = ({ activeView, currentAgent, backen
           <span className="badge badge-active">
             <span className="badge-dot" />
             Ready for Backend Orchestrator
+          </span>
+        )}
+        {activeView === 'discovery' && (
+          <span className="badge badge-cyan">
+            <span className="badge-dot" />
+            Autonomous Web & Registry Research
           </span>
         )}
         {activeView === 'history' && (

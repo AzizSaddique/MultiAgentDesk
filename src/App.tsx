@@ -4,6 +4,7 @@ import { Header } from './components/Header';
 import { AgentDetail } from './components/AgentDetail';
 import { EnvironmentStatus } from './components/EnvironmentStatus';
 import { OutreachHistory } from './components/OutreachHistory';
+import { LeadDiscovery } from './components/LeadDiscovery';
 import { AgentModel } from './types/agent';
 import { useBackendStatus } from './hooks/useBackendStatus';
 
@@ -108,7 +109,7 @@ const INITIAL_AGENTS: AgentModel[] = [
 export function App() {
   const [agents] = useState<AgentModel[]>(INITIAL_AGENTS);
   const [selectedAgentId, setSelectedAgentId] = useState<string>('agent-1');
-  const [activeView, setActiveView] = useState<'agent' | 'environment' | 'history'>('agent');
+  const [activeView, setActiveView] = useState<'agent' | 'discovery' | 'environment' | 'history'>('agent');
   const backendStatus = useBackendStatus();
 
   const selectedAgent = agents.find((a) => a.id === selectedAgentId) || agents[0];
@@ -130,6 +131,11 @@ export function App() {
             agent={selectedAgent}
             backendStatus={backendStatus}
             onNavigateToHistory={() => setActiveView('history')}
+          />
+        ) : activeView === 'discovery' ? (
+          <LeadDiscovery
+            backendStatus={backendStatus}
+            onNavigateToOutreach={() => setActiveView('agent')}
           />
         ) : activeView === 'environment' ? (
           <EnvironmentStatus backendStatus={backendStatus} />

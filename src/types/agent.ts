@@ -189,3 +189,109 @@ export interface HistoryFilterParams {
   page?: number;
   page_size?: number;
 }
+
+export interface DiscoveryPlan {
+  original_prompt: string;
+  industry: string;
+  location_region?: string | null;
+  location_city?: string | null;
+  location_country?: string | null;
+  keywords: string[];
+  target_lead_count: number;
+  company_size_criteria?: string | null;
+  service_criteria?: string | null;
+  desired_contact_info: string[];
+  search_language: string;
+  max_crawl_depth: number;
+  max_pages_per_domain: number;
+  is_ambiguous: boolean;
+  clarification_question?: string | null;
+}
+
+export interface DiscoveryPlanRequest {
+  prompt: string;
+  ai_config?: AIProviderConfig;
+}
+
+export interface DiscoveryJobCreateRequest {
+  plan: DiscoveryPlan;
+  search_provider?: string;
+  ai_config?: AIProviderConfig;
+}
+
+export interface DiscoveredLeadRecord {
+  id: string;
+  job_id: string;
+  company_name: string;
+  website: string;
+  industry?: string;
+  city?: string;
+  country?: string;
+  services_description?: string;
+  email?: string;
+  email_verification_status: 'verified_public' | 'found_unverified' | 'not_found' | 'invalid';
+  phone?: string;
+  phone_verification_status: 'verified_public' | 'unverified' | 'not_found';
+  source_urls: string[];
+  discovery_source: string;
+  discovery_query: string;
+  discovered_at: string;
+  relevance_score: number;
+  relevance_explanation: string;
+  research_status: 'completed' | 'skipped' | 'failed';
+  failure_reason?: string | null;
+  verified_fields: string[];
+  is_live: boolean;
+}
+
+export interface DiscoveryJob {
+  id: string;
+  prompt: string;
+  status: 'pending' | 'running' | 'completed' | 'cancelled' | 'failed';
+  created_at: string;
+  started_at?: string | null;
+  completed_at?: string | null;
+  provider_used: string;
+  total_target: number;
+  discovered_count: number;
+  verified_email_count: number;
+  duplicate_count: number;
+  skipped_count: number;
+  failed_count: number;
+  progress_percent: number;
+  current_stage?: string;
+  plan_json?: string;
+  error_message?: string | null;
+}
+
+export interface DiscoveryJobResponse {
+  job: DiscoveryJob;
+  leads: DiscoveredLeadRecord[];
+}
+
+export interface DiscoveredLeadsResponse {
+  leads: DiscoveredLeadRecord[];
+  total: number;
+  page: number;
+  page_size: number;
+  total_pages: number;
+  verification_counts: Record<string, number>;
+}
+
+export interface SearchProviderInfo {
+  id: string;
+  name: string;
+  description: string;
+  is_configured: boolean;
+  requires_key: boolean;
+  notice: string;
+}
+
+export interface SearchProvidersResponse {
+  providers: SearchProviderInfo[];
+}
+
+export interface TransferToOutreachRequest {
+  job_id: string;
+  lead_ids: string[];
+}

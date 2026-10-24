@@ -157,3 +157,157 @@ class OutreachHistoryResponse(BaseModel):
             data["counts_by_status"] = counts
         return data
 
+
+# ==============================================================================
+# Automated Lead Discovery Agent Models
+# ==============================================================================
+
+class DiscoveryPlanRequest(BaseModel):
+    prompt: str = Field(..., min_length=3, max_length=1000, description="Natural language request for lead discovery")
+    ai_config: Optional[AIProviderConfig] = Field(default=None, description="Optional AI configuration for request parsing")
+
+class DiscoveryPlan(BaseModel):
+    prompt: str = Field(default="", description="Target request prompt")
+    industry: str = Field(default="", description="Target industry or business domain")
+    location: str = Field(default="", description="Target geographic market (city/region/country)")
+    city: Optional[str] = Field(default="", description="Target city if specified")
+    country: Optional[str] = Field(default="", description="Target country if specified")
+    keywords: List[str] = Field(default_factory=list, description="Target business activity keywords")
+    target_count: int = Field(default=25, ge=1, le=100, description="Target number of leads to discover")
+    search_queries: List[str] = Field(default_factory=list, description="Synthesized search engine & directory queries")
+    company_criteria: Optional[str] = Field(default="", description="Optional company size or customer focus criteria")
+    desired_contacts: List[str] = Field(default_factory=lambda: ["email", "website", "phone"], description="Requested contact modalities")
+    search_language: str = Field(default="en", description="Search language code")
+    max_crawl_depth: int = Field(default=1, ge=0, le=2, description="Maximum subpage crawl depth")
+    max_pages_per_domain: int = Field(default=2, ge=1, le=5, description="Maximum pages to inspect per domain")
+    is_ambiguous: bool = Field(default=False, description="True if prompt lacks clear location or business domain")
+    clarification_question: Optional[str] = Field(default=None, description="Clarification question if prompt is ambiguous")
+
+    @model_validator(mode="before")
+    @classmethod
+    def _remap_fields(cls, data: Any) -> Any:
+        if isinstance(data, dict):
+            d = dict(data)
+            if "original_prompt" in d and not d.get("prompt"):
+                d["prompt"] = d["original_prompt"]
+            if "target_lead_count" in d and not d.get("target_count"):
+                d["target_count"] = d["target_lead_count"]
+            if "location_city" in d and not d.get("city"):
+                d["city"] = d["location_city"]
+            if "location_country" in d and not d.get("country"):
+                d["country"] = d["location_country"]
+            if "service_criteria" in d and not d.get("company_criteria"):
+                d["company_criteria"] = d["service_criteria"]
+            if "desired_contact_info" in d and not d.get("desired_contacts"):
+                d["desired_contacts"] = d["desired_contact_info"]
+            if not d.get("location"):
+                loc_parts = [d.get("city"), d.get("country")]
+                d["location"] = ", ".join([p for p in loc_parts if p]) or "Global"
+            return d
+        return data
+
+    @property
+    def original_prompt(self) -> str:
+        return self.prompt
+
+    @property
+    def target_lead_count(self) -> int:
+        return self.target_count
+
+    @property
+    def location_city(self) -> Optional[str]:
+        return self.city
+
+    @property
+    def location_country(self) -> Optional[str]:
+        return self.country
+
+    @property
+    def service_criteria(self) -> Optional[str]:
+        return self.company_criteria
+
+    @property
+    def desired_contact_info(self) -> List[str]:
+        return self.desired_contacts
+
+class DiscoveryJobCreateRequest(BaseModel):
+    plan: DiscoveryPlan
+    search_provider: Optional[str] = Field(default="auto", description="Search source: 'auto', 'tavily', 'google', 'bing', or 'directory'")
+    ai_config: Optional[AIProviderConfig] = None
+
+class DiscoveredLeadRecord(BaseModel):
+    id: str
+    job_id: str
+    company_name: str
+    website: str
+    industry: Optional[str] = ""
+    city: Optional[str] = ""
+    country: Optional[str] = ""
+    services_description: Optional[str] = ""
+    email: Optional[str] = ""
+    email_verification_status: str = Field(
+        default="not_found",
+        description="Verification state: 'verified_public', 'found_unverified', 'not_found', or 'invalid'"
+    )
+    phone: Optional[str] = ""
+    phone_verification_status: str = Field(
+        default="not_found",
+        description="Phone verification: 'verified_public', 'unverified', or 'not_found'"
+    )
+    source_urls: List[str] = Field(default_factory=list, description="All public source URLs confirming these facts")
+    discovery_source: str = Field(default="google-search", description="Provider that first found this company")
+    discovery_query: str = Field(default="", description="Search query that surfaced this lead")
+    discovered_at: str = Field(..., description="UTC ISO timestamp of discovery")
+    relevance_score: float = Field(default=0.8, ge=0.0, le=1.0, description="Relevance score between 0.0 and 1.0")
+    relevance_explanation: str = Field(default="", description="Short evidence-backed explanation of match")
+    research_status: str = Field(default="completed", description="'completed', 'skipped', or 'failed'")
+    failure_reason: Optional[str] = None
+    verified_fields: List[str] = Field(default_factory=list)
+    is_live: bool = Field(default=True)
+
+class DiscoveryJob(BaseModel):
+    id: str
+    prompt: str
+    status: str = Field(default="pending", description="'pending', 'running', 'completed', 'cancelled', 'failed'")
+    created_at: str
+    started_at: Optional[str] = None
+    completed_at: Optional[str] = None
+    provider_used: str = "auto"
+    total_target: int = 25
+    discovered_count: int = 0
+    verified_email_count: int = 0
+    duplicate_count: int = 0
+    skipped_count: int = 0
+    failed_count: int = 0
+    progress_percent: int = 0
+    current_stage: Optional[str] = "Queued"
+    plan_json: Optional[str] = None
+    error_message: Optional[str] = None
+
+class DiscoveryJobResponse(BaseModel):
+    job: DiscoveryJob
+    leads: List[DiscoveredLeadRecord] = Field(default_factory=list)
+
+class DiscoveredLeadsResponse(BaseModel):
+    leads: List[DiscoveredLeadRecord]
+    total: int
+    page: int
+    page_size: int
+    total_pages: int
+    verification_counts: dict = Field(default_factory=dict)
+
+class SearchProviderInfo(BaseModel):
+    id: str
+    name: str
+    description: str
+    is_configured: bool
+    requires_key: bool
+    notice: str
+
+class SearchProvidersResponse(BaseModel):
+    providers: List[SearchProviderInfo]
+
+class TransferToOutreachRequest(BaseModel):
+    job_id: str
+    lead_ids: List[str] = Field(default_factory=list, description="IDs of discovered leads to transfer to outreach")
+

@@ -672,7 +672,7 @@ def get_discovery_job(job_id: str):
     return DiscoveryJobResponse(job=job, leads=leads)
 
 
-@app.post("/api/discovery/jobs/{job_id}/cancel")
+@app.post("/api/discovery/jobs/{job_id}/cancel", response_model=DiscoveryJob)
 def cancel_discovery_job(job_id: str):
     """
     Cooperatively stops the background discovery pipeline for the specified job.
@@ -682,6 +682,8 @@ def cancel_discovery_job(job_id: str):
         raise HTTPException(status_code=404, detail=f"Discovery job '{job_id}' not found.")
 
     job_dict = global_dispatch_tracker.get_discovery_job(job_id)
+    if not job_dict:
+        raise HTTPException(status_code=404, detail=f"Discovery job '{job_id}' not found.")
     return DiscoveryJob(**job_dict)
 
 

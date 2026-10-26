@@ -7,26 +7,27 @@ from datetime import datetime, timezone
 import uvicorn
 from fastapi import FastAPI, HTTPException, Response
 from fastapi.middleware.cors import CORSMiddleware
-from typing import List, Optional, Dict
+from typing import List, Optional, Dict, Any
 
-# On Windows, configure default policy to ProactorEventLoop before loops are started
+# On Windows, configure default policy to WindowsSelectorEventLoopPolicy to prevent WinError 87 socket crash
 if sys.platform == "win32":
     try:
-        if not isinstance(asyncio.get_event_loop_policy(), asyncio.WindowsProactorEventLoopPolicy):
-            asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
+        if not isinstance(asyncio.get_event_loop_policy(), asyncio.WindowsSelectorEventLoopPolicy):
+            asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
     except Exception:
         pass
 
 try:
     from .models import (
         ResearchRequest, ResearchResponse, CSVExportRequest,
-        OutreachDraftRequest, OutreachDraftResponse,
+        OutreachDraftRequest, OutreachDraftResponse, OutreachDraft,
         SendOutreachRequest, SendOutreachResponse, AIProviderConfig,
         OutreachHistoryItem, OutreachHistoryResponse,
         DiscoveryPlanRequest, DiscoveryPlan, DiscoveryJobCreateRequest,
         DiscoveredLeadRecord, DiscoveryJob, DiscoveryJobResponse,
         DiscoveredLeadsResponse, SearchProviderInfo, SearchProvidersResponse,
-        TransferToOutreachRequest, LeadRecord,
+        TransferToOutreachRequest, LeadRecord, LeadTransferResponse,
+        UpdateDraftRequest, DiscardDraftRequest, OutreachDraftsListResponse,
     )
     from .providers.mock import MockResearchProvider
     from .providers.playwright_scraper import PlaywrightResearchProvider
@@ -43,13 +44,14 @@ try:
 except (ImportError, ValueError):
     from models import (
         ResearchRequest, ResearchResponse, CSVExportRequest,
-        OutreachDraftRequest, OutreachDraftResponse,
+        OutreachDraftRequest, OutreachDraftResponse, OutreachDraft,
         SendOutreachRequest, SendOutreachResponse, AIProviderConfig,
         OutreachHistoryItem, OutreachHistoryResponse,
         DiscoveryPlanRequest, DiscoveryPlan, DiscoveryJobCreateRequest,
         DiscoveredLeadRecord, DiscoveryJob, DiscoveryJobResponse,
         DiscoveredLeadsResponse, SearchProviderInfo, SearchProvidersResponse,
-        TransferToOutreachRequest, LeadRecord,
+        TransferToOutreachRequest, LeadRecord, LeadTransferResponse,
+        UpdateDraftRequest, DiscardDraftRequest, OutreachDraftsListResponse,
     )
     from providers.mock import MockResearchProvider
     from providers.playwright_scraper import PlaywrightResearchProvider
@@ -103,6 +105,10 @@ def _init_draft_storage():
 def _persist_draft(draft):
     """Persists an OutreachDraft to SQLite for verification status durability across restarts."""
     try:
+        global_dispatch_tracker.save_draft(draft)
+    except Exception:
+        pass
+    try:
         backend_dir = os.path.dirname(os.path.abspath(__file__))
         storage_dir = os.path.normpath(os.path.join(backend_dir, "..", "storage"))
         db_path = os.path.join(storage_dir, "dispatches.db")
@@ -117,6 +123,14 @@ def _persist_draft(draft):
 
 # Initialize draft storage on startup
 _init_draft_storage()
+
+def _to_draft_model(item: Any) -> OutreachDraft:
+    """Safely normalizes an OutreachDraft instance or raw dict to an OutreachDraft model."""
+    if isinstance(item, OutreachDraft):
+        return item
+    if isinstance(item, dict):
+        return OutreachDraft.model_validate(item)
+    raise ValueError(f"Cannot convert {type(item)} to OutreachDraft")
 
 
 app = FastAPI(
@@ -281,7 +295,7 @@ async def draft_outreach(request: OutreachDraftRequest):
     try:
         provider = get_llm_provider(request.ai_config)
     except Exception as e:
-        raise HTTPException(status_code=400, detail=f"AI Provider configuration error: {str(e)}")
+        raise HTTPException(status_code=502, detail=f"AI Provider configuration error: {str(e)}")
 
     drafts = []
     verified_count = 0
@@ -393,6 +407,11 @@ async def send_outreach(request: SendOutreachRequest):
             )
 
         reg_draft = DRAFT_REGISTRY.get(request.draft_id)
+        if not reg_draft:
+            stored_draft = global_dispatch_tracker.get_draft(request.draft_id)
+            if stored_draft:
+                reg_draft = OutreachDraft(**stored_draft)
+                DRAFT_REGISTRY[reg_draft.id] = reg_draft
         # If the draft was recorded in DRAFT_REGISTRY, its verified status is authoritative:
         if reg_draft:
             if not reg_draft.has_verified_email:
@@ -759,64 +778,350 @@ def export_discovered_leads_csv(
     )
 
 
-@app.post("/api/discovery/transfer-outreach", response_model=OutreachDraftResponse)
+@app.post("/api/discovery/transfer-outreach", response_model=LeadTransferResponse)
 async def transfer_leads_to_outreach(request: TransferToOutreachRequest):
     """
-    Converts selected discovered leads into Outreach drafts and registers them in the
-    outreach drafting workflow. Preserves strict public email verification rules.
+    Converts selected discovered leads into personalized software development outreach drafts
+    and registers them in the outreach drafting workflow and SQLite database.
+    Prevents duplicate drafts for the same lead when prevent_duplicates is True.
     """
     if not request.lead_ids:
         raise HTTPException(status_code=422, detail="No lead IDs provided for outreach transfer.")
 
-    llm_provider = get_llm_provider(None)
+    try:
+        llm_provider = get_llm_provider(request.ai_config)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"AI Provider configuration error: {str(exc)}")
+
     drafts = []
     verified_count = 0
     missing_count = 0
+    created_count = 0
+    skipped_count = 0
+    failed_count = 0
+    messages = []
 
     for lead_id in request.lead_ids:
         lead_data = global_dispatch_tracker.get_discovered_lead(lead_id)
         if not lead_data:
-            continue
+            # Check without disc- prefix if applicable
+            clean_id = lead_id.replace("disc-", "") if lead_id.startswith("disc-") else lead_id
+            lead_data = global_dispatch_tracker.get_discovered_lead(clean_id)
+            if not lead_data:
+                failed_count += 1
+                messages.append(f"Lead ID '{lead_id}' not found in discovery records.")
+                continue
+
+        raw_id = lead_data["id"]
+        disc_lead_id = f"disc-{raw_id}"
+        company_name = lead_data.get("company_name", "Unknown Company").strip()
+
+        # Duplicate check if prevent_duplicates is enabled
+        if request.prevent_duplicates:
+            existing_draft_raw = (
+                global_dispatch_tracker.get_draft_by_lead_id(disc_lead_id)
+                or global_dispatch_tracker.get_draft_by_lead_id(raw_id)
+                or DRAFT_REGISTRY.get(disc_lead_id)
+                or DRAFT_REGISTRY.get(raw_id)
+            )
+            if existing_draft_raw:
+                existing_draft = _to_draft_model(existing_draft_raw)
+                if existing_draft.status != "rejected":
+                    skipped_count += 1
+                    messages.append(f"Skipped {company_name}: draft already exists ({existing_draft.id}).")
+                    drafts.append(existing_draft)
+                    DRAFT_REGISTRY[existing_draft.id] = existing_draft
+                    if existing_draft.has_verified_email:
+                        verified_count += 1
+                    else:
+                        missing_count += 1
+                    continue
 
         has_verified_email = (lead_data.get("email_verification_status") == "verified_public")
         public_email = lead_data.get("email") if has_verified_email else "(No public email listed)"
 
+        # Prepare lead record for personalized draft generation
         lead_obj = LeadRecord(
-            id=f"disc-{lead_data['id']}",
-            company_name=lead_data["company_name"],
-            contact_name="",
-            contact_role="",
+            id=disc_lead_id,
+            company_name=company_name,
+            contact_name=lead_data.get("contact_name") or "",
+            contact_role=lead_data.get("contact_role") or "",
             email=public_email,
-            website=lead_data["website"],
-            industry=lead_data["industry"],
-            location=f"{lead_data['city']}, {lead_data['country']}".strip(", "),
-            source_url=lead_data["website"],
-            description=lead_data.get("services_description", ""),
+            website=lead_data.get("website", ""),
+            industry=lead_data.get("industry", ""),
+            location=f"{lead_data.get('city', '')}, {lead_data.get('country', '')}".strip(", "),
+            source_url=lead_data.get("source_url") or lead_data.get("website", ""),
+            description=lead_data.get("services_description") or lead_data.get("description", ""),
             verified_fields=lead_data.get("verified_fields", []),
             is_live=True,
         )
-
-        draft = await llm_provider.draft_lead_outreach(
-            lead=lead_obj,
-            service_offering=lead_data.get("services_description") or "Commercial Partnership",
+        service_offering = (
+            request.service_offering
+            or "Custom software development, IoT systems, and cloud architecture"
         )
 
-        DRAFT_REGISTRY[draft.id] = draft
-        _persist_draft(draft)
-        drafts.append(draft)
+        try:
+            draft = await llm_provider.draft_lead_outreach(
+                lead=lead_obj,
+                service_offering=service_offering,
+                tone=request.tone or "professional",
+                sender_name=request.sender_name or "AgentDesk Operator",
+                sender_company=request.sender_company or "AgentDesk",
+            )
+            # Attach discovery metadata directly to the draft
+            draft.discovery_source = lead_data.get("discovery_source") or lead_data.get("search_provider") or "Web Discovery"
+            draft.discovery_query = lead_data.get("discovery_query") or lead_data.get("query") or ""
+            if lead_data.get("relevance_explanation"):
+                draft.relevance_explanation = lead_data["relevance_explanation"]
 
-        if draft.has_verified_email:
-            verified_count += 1
-        else:
-            missing_count += 1
+            # Save draft in memory and SQLite persistent tables
+            DRAFT_REGISTRY[draft.id] = draft
+            _persist_draft(draft)
+            drafts.append(draft)
+            created_count += 1
 
-    return OutreachDraftResponse(
+            # Connect with Outreach History system (record drafted status)
+            global_dispatch_tracker.record_history_entry(
+                draft_id=draft.id,
+                recipient_email=draft.recipient_email,
+                subject=draft.subject,
+                status="drafted",
+                provider=llm_provider.display_name,
+                is_simulated=False,
+                recipient_name=draft.recipient_name,
+                company_name=draft.company_name,
+                body_preview=draft.body,
+                source_url=draft.source_url,
+                dispatched_at=draft.created_at,
+            )
+
+            if draft.has_verified_email:
+                verified_count += 1
+            else:
+                missing_count += 1
+
+            messages.append(f"Created personalized draft for {company_name}.")
+        except Exception as exc:
+            failed_count += 1
+            messages.append(f"Failed drafting for {company_name}: {str(exc)}")
+
+    return LeadTransferResponse(
         drafts=drafts,
         total=len(drafts),
         verified_email_count=verified_count,
         missing_email_count=missing_count,
         provider_used=llm_provider.display_name,
+        created_count=created_count,
+        skipped_count=skipped_count,
+        failed_count=failed_count,
+        messages=messages,
     )
+
+
+# -------------------------------------------------------------------------
+# Outreach Draft Management & Review Endpoints
+# -------------------------------------------------------------------------
+
+@app.get("/api/outreach/drafts", response_model=OutreachDraftsListResponse)
+def list_outreach_drafts(
+    status: Optional[str] = None,
+    search: Optional[str] = None,
+    page: int = 1,
+    page_size: int = 25,
+):
+    """
+    Returns paginated, searchable, and filtered outreach drafts from SQLite persistence.
+    Supports filtering by status: 'drafted', 'approved', 'rejected', 'sent', or 'all'.
+    """
+    drafts_list, total_count, total_pages, counts = global_dispatch_tracker.query_drafts(
+        status=status,
+        search=search,
+        page=page,
+        page_size=page_size,
+    )
+    models = [_to_draft_model(d) for d in drafts_list]
+    for d in models:
+        if d.id not in DRAFT_REGISTRY:
+            DRAFT_REGISTRY[d.id] = d
+
+    return OutreachDraftsListResponse(
+        drafts=models,
+        total=total_count,
+        page=page,
+        page_size=page_size,
+        total_pages=total_pages,
+        counts_by_status=counts,
+    )
+
+
+@app.get("/api/outreach/drafts/{draft_id}", response_model=OutreachDraft)
+def get_outreach_draft(draft_id: str):
+    """
+    Fetches a specific outreach draft by its ID.
+    """
+    draft_obj = global_dispatch_tracker.get_draft(draft_id) or DRAFT_REGISTRY.get(draft_id)
+    if not draft_obj:
+        raise HTTPException(status_code=404, detail=f"Draft '{draft_id}' not found.")
+    return _to_draft_model(draft_obj)
+
+
+@app.put("/api/outreach/drafts/{draft_id}", response_model=OutreachDraft)
+def update_outreach_draft(draft_id: str, request: UpdateDraftRequest):
+    """
+    Updates the subject, message body, or recipient of an outreach draft.
+    Durably updates SQLite persistence and memory registry.
+    """
+    draft_obj = global_dispatch_tracker.get_draft(draft_id) or DRAFT_REGISTRY.get(draft_id)
+    if not draft_obj:
+        raise HTTPException(status_code=404, detail=f"Draft '{draft_id}' not found.")
+
+    draft = _to_draft_model(draft_obj)
+    if draft.status == "sent":
+        raise HTTPException(status_code=400, detail="Cannot edit a draft that has already been dispatched.")
+
+    updates: Dict[str, Any] = {}
+    if request.subject is not None:
+        updates["subject"] = request.subject.strip()
+    if request.body is not None:
+        updates["body"] = request.body.strip()
+    if request.recipient_name is not None:
+        updates["recipient_name"] = request.recipient_name.strip()
+
+    updated = global_dispatch_tracker.update_draft(draft_id, updates)
+    if not updated:
+        if "subject" in updates: draft.subject = updates["subject"]
+        if "body" in updates: draft.body = updates["body"]
+        if "recipient_name" in updates: draft.recipient_name = updates["recipient_name"]
+        draft.updated_at = datetime.now(timezone.utc).isoformat()
+        global_dispatch_tracker.save_draft(draft)
+        updated = draft
+
+    updated_draft = _to_draft_model(updated)
+    DRAFT_REGISTRY[draft_id] = updated_draft
+    _persist_draft(updated_draft)
+
+    # Record updated draft in history
+    global_dispatch_tracker.record_history_entry(
+        draft_id=updated_draft.id,
+        recipient_email=updated_draft.recipient_email,
+        subject=updated_draft.subject,
+        status=updated_draft.status,
+        provider="operator-edit",
+        is_simulated=False,
+        recipient_name=updated_draft.recipient_name,
+        company_name=updated_draft.company_name,
+        body_preview=updated_draft.body,
+        source_url=updated_draft.source_url,
+        dispatched_at=updated_draft.updated_at or updated_draft.created_at,
+    )
+    return updated_draft
+
+
+@app.post("/api/outreach/drafts/{draft_id}/approve", response_model=OutreachDraft)
+def approve_outreach_draft(draft_id: str):
+    """
+    Explicitly approves a draft for human-controlled dispatch.
+    Safety Gate: Requires target lead to possess a verified public email address.
+    """
+    draft_obj = global_dispatch_tracker.get_draft(draft_id) or DRAFT_REGISTRY.get(draft_id)
+    if not draft_obj:
+        raise HTTPException(status_code=404, detail=f"Draft '{draft_id}' not found.")
+
+    draft = _to_draft_model(draft_obj)
+    if not draft.has_verified_email:
+        raise HTTPException(
+            status_code=422,
+            detail="Safety Gate: Cannot approve outreach draft without a verified public business email address."
+        )
+    if draft.status == "sent":
+        raise HTTPException(status_code=400, detail="Cannot approve a draft that has already been dispatched.")
+
+    try:
+        approved_obj = global_dispatch_tracker.approve_draft(draft_id)
+    except ValueError as ve:
+        raise HTTPException(status_code=422, detail=str(ve))
+
+    if not approved_obj:
+        draft.status = "approved"
+        draft.updated_at = datetime.now(timezone.utc).isoformat()
+        global_dispatch_tracker.save_draft(draft)
+        approved_obj = draft
+
+    approved_draft = _to_draft_model(approved_obj)
+    DRAFT_REGISTRY[draft_id] = approved_draft
+    _persist_draft(approved_draft)
+    return approved_draft
+
+
+@app.post("/api/outreach/drafts/{draft_id}/unapprove", response_model=OutreachDraft)
+def unapprove_outreach_draft(draft_id: str):
+    """
+    Reverts an approved draft back to drafted status.
+    """
+    draft_obj = global_dispatch_tracker.get_draft(draft_id) or DRAFT_REGISTRY.get(draft_id)
+    if not draft_obj:
+        raise HTTPException(status_code=404, detail=f"Draft '{draft_id}' not found.")
+
+    draft = _to_draft_model(draft_obj)
+    if draft.status == "sent":
+        raise HTTPException(status_code=400, detail="Cannot unapprove a draft that has already been dispatched.")
+
+    draft.status = "drafted"
+    draft.updated_at = datetime.now(timezone.utc).isoformat()
+    global_dispatch_tracker.save_draft(draft)
+    DRAFT_REGISTRY[draft_id] = draft
+    _persist_draft(draft)
+    return draft
+
+
+@app.post("/api/outreach/drafts/{draft_id}/discard", response_model=OutreachDraft)
+def discard_outreach_draft(draft_id: str, request: Optional[DiscardDraftRequest] = None):
+    """
+    Marks a draft as rejected/discarded.
+    """
+    draft_obj = global_dispatch_tracker.get_draft(draft_id) or DRAFT_REGISTRY.get(draft_id)
+    if not draft_obj:
+        raise HTTPException(status_code=404, detail=f"Draft '{draft_id}' not found.")
+
+    draft = _to_draft_model(draft_obj)
+    if draft.status == "sent":
+        raise HTTPException(status_code=400, detail="Cannot discard a draft that has already been dispatched.")
+
+    reason = request.reason if request else "Discarded by operator"
+    try:
+        discarded_obj = global_dispatch_tracker.discard_draft(draft_id, reason=reason)
+    except ValueError as ve:
+        raise HTTPException(status_code=400, detail=str(ve))
+
+    if not discarded_obj:
+        draft.status = "rejected"
+        draft.updated_at = datetime.now(timezone.utc).isoformat()
+        global_dispatch_tracker.save_draft(draft)
+        discarded_obj = draft
+
+    discarded_draft = _to_draft_model(discarded_obj)
+    DRAFT_REGISTRY[draft_id] = discarded_draft
+    _persist_draft(discarded_draft)
+    return discarded_draft
+
+
+@app.delete("/api/outreach/drafts/{draft_id}")
+def delete_outreach_draft(draft_id: str):
+    """
+    Deletes an outreach draft from storage.
+    """
+    draft_obj = global_dispatch_tracker.get_draft(draft_id) or DRAFT_REGISTRY.get(draft_id)
+    if not draft_obj:
+        raise HTTPException(status_code=404, detail=f"Draft '{draft_id}' not found.")
+
+    draft = _to_draft_model(draft_obj)
+    if draft.status == "sent":
+        raise HTTPException(status_code=400, detail="Cannot delete a draft that has already been dispatched.")
+
+    deleted = global_dispatch_tracker.delete_draft(draft_id)
+    DRAFT_REGISTRY.pop(draft_id, None)
+    return {"deleted": True, "draft_id": draft_id}
+
 
 
 if __name__ == "__main__":

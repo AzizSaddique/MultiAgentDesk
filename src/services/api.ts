@@ -4,6 +4,7 @@ import {
   ResearchResponse,
   OutreachDraftRequest,
   OutreachDraftResponse,
+  OutreachDraft,
   SendOutreachRequest,
   SendOutreachResponse,
   ProvidersResponse,
@@ -15,6 +16,9 @@ import {
   DiscoveredLeadsResponse,
   SearchProvidersResponse,
   AIProviderConfig,
+  LeadTransferResponse,
+  UpdateDraftRequest,
+  OutreachDraftsListResponse,
 } from '../types/agent';
 
 export interface HealthResponse {
@@ -589,12 +593,21 @@ export async function downloadDiscoveredLeadsCsv(
 }
 
 /**
- * Transfers selected discovered leads to the existing outreach drafting workflow.
+ * Transfers selected discovered leads to the personalized software development outreach drafting workflow.
+ * Supports duplicate prevention and custom tone/services options.
  */
 export async function transferLeadsToOutreach(
   jobId: string,
-  leadIds: string[]
-): Promise<OutreachDraftResponse> {
+  leadIds: string[],
+  options?: {
+    serviceOffering?: string;
+    tone?: 'professional' | 'consultative' | 'concise';
+    senderName?: string;
+    senderCompany?: string;
+    aiConfig?: AIProviderConfig;
+    preventDuplicates?: boolean;
+  }
+): Promise<LeadTransferResponse> {
   const response = await fetch(`${BACKEND_BASE_URL}/api/discovery/transfer-outreach`, {
     method: 'POST',
     headers: {
@@ -604,6 +617,12 @@ export async function transferLeadsToOutreach(
     body: JSON.stringify({
       job_id: jobId,
       lead_ids: leadIds,
+      service_offering: options?.serviceOffering || "Custom software development, IoT systems, and cloud architecture",
+      tone: options?.tone || "professional",
+      sender_name: options?.senderName || "AgentDesk Operator",
+      sender_company: options?.senderCompany || "AgentDesk",
+      ai_config: options?.aiConfig,
+      prevent_duplicates: options?.preventDuplicates ?? true,
     }),
   });
 
@@ -616,6 +635,180 @@ export async function transferLeadsToOutreach(
       // fallback
     }
     throw new Error(detail);
+  }
+
+  return await response.json();
+}
+
+/**
+ * Fetches paginated, filtered outreach drafts from persistent storage.
+ */
+export async function fetchOutreachDrafts(
+  status?: string,
+  search?: string,
+  page: number = 1,
+  pageSize: number = 25
+): Promise<OutreachDraftsListResponse> {
+  const queryParts: string[] = [`page=${page}`, `page_size=${pageSize}`];
+  if (status && status !== 'all') queryParts.push(`status=${encodeURIComponent(status)}`);
+  if (search && search.trim()) queryParts.push(`search=${encodeURIComponent(search.trim())}`);
+
+  const queryString = `?${queryParts.join('&')}`;
+  const response = await fetch(`${BACKEND_BASE_URL}/api/outreach/drafts${queryString}`, {
+    method: 'GET',
+    headers: {
+      'Accept': 'application/json',
+    },
+  });
+
+  if (!response.ok) {
+    throw new Error(`Failed to fetch outreach drafts (${response.status})`);
+  }
+
+  return await response.json();
+}
+
+/**
+ * Fetches a single outreach draft by ID.
+ */
+export async function fetchOutreachDraft(draftId: string): Promise<OutreachDraft> {
+  const response = await fetch(`${BACKEND_BASE_URL}/api/outreach/drafts/${encodeURIComponent(draftId)}`, {
+    method: 'GET',
+    headers: {
+      'Accept': 'application/json',
+    },
+  });
+
+  if (!response.ok) {
+    throw new Error(`Failed to fetch outreach draft ${draftId} (${response.status})`);
+  }
+
+  return await response.json();
+}
+
+/**
+ * Updates an outreach draft (subject, body, recipient).
+ */
+export async function updateOutreachDraft(
+  draftId: string,
+  updates: UpdateDraftRequest
+): Promise<OutreachDraft> {
+  const response = await fetch(`${BACKEND_BASE_URL}/api/outreach/drafts/${encodeURIComponent(draftId)}`, {
+    method: 'PUT',
+    headers: {
+      'Content-Type': 'application/json',
+      'Accept': 'application/json',
+    },
+    body: JSON.stringify(updates),
+  });
+
+  if (!response.ok) {
+    let detail = `Failed to update draft (${response.status})`;
+    try {
+      const err = await response.json();
+      if (err.detail) detail = String(err.detail);
+    } catch {
+      // fallback
+    }
+    throw new Error(detail);
+  }
+
+  return await response.json();
+}
+
+/**
+ * Explicitly approves an outreach draft for human-controlled dispatch.
+ */
+export async function approveOutreachDraft(draftId: string): Promise<OutreachDraft> {
+  const response = await fetch(`${BACKEND_BASE_URL}/api/outreach/drafts/${encodeURIComponent(draftId)}/approve`, {
+    method: 'POST',
+    headers: {
+      'Accept': 'application/json',
+    },
+  });
+
+  if (!response.ok) {
+    let detail = `Failed to approve draft (${response.status})`;
+    try {
+      const err = await response.json();
+      if (err.detail) detail = String(err.detail);
+    } catch {
+      // fallback
+    }
+    throw new Error(detail);
+  }
+
+  return await response.json();
+}
+
+/**
+ * Reverts approval status of a draft back to 'drafted'.
+ */
+export async function unapproveOutreachDraft(draftId: string): Promise<OutreachDraft> {
+  const response = await fetch(`${BACKEND_BASE_URL}/api/outreach/drafts/${encodeURIComponent(draftId)}/unapprove`, {
+    method: 'POST',
+    headers: {
+      'Accept': 'application/json',
+    },
+  });
+
+  if (!response.ok) {
+    let detail = `Failed to unapprove draft (${response.status})`;
+    try {
+      const err = await response.json();
+      if (err.detail) detail = String(err.detail);
+    } catch {
+      // fallback
+    }
+    throw new Error(detail);
+  }
+
+  return await response.json();
+}
+
+/**
+ * Rejects / discards an outreach draft.
+ */
+export async function discardOutreachDraft(
+  draftId: string,
+  reason?: string
+): Promise<OutreachDraft> {
+  const response = await fetch(`${BACKEND_BASE_URL}/api/outreach/drafts/${encodeURIComponent(draftId)}/discard`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Accept': 'application/json',
+    },
+    body: JSON.stringify({ reason }),
+  });
+
+  if (!response.ok) {
+    let detail = `Failed to discard draft (${response.status})`;
+    try {
+      const err = await response.json();
+      if (err.detail) detail = String(err.detail);
+    } catch {
+      // fallback
+    }
+    throw new Error(detail);
+  }
+
+  return await response.json();
+}
+
+/**
+ * Deletes an outreach draft.
+ */
+export async function deleteOutreachDraft(draftId: string): Promise<{ deleted: boolean; draft_id: string }> {
+  const response = await fetch(`${BACKEND_BASE_URL}/api/outreach/drafts/${encodeURIComponent(draftId)}`, {
+    method: 'DELETE',
+    headers: {
+      'Accept': 'application/json',
+    },
+  });
+
+  if (!response.ok) {
+    throw new Error(`Failed to delete draft (${response.status})`);
   }
 
   return await response.json();

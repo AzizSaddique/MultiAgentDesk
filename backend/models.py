@@ -69,17 +69,24 @@ class OutreachDraft(BaseModel):
     id: str
     lead_id: str
     company_name: str
-    recipient_name: str
-    recipient_role: str
+    recipient_name: Optional[str] = ""
+    recipient_role: Optional[str] = ""
     recipient_email: str
-    has_verified_email: bool
+    has_verified_email: bool = False
     subject: str
     body: str
     status: str = Field(default="drafted", description="Draft review status: 'drafted', 'approved', 'rejected', 'sent'")
     created_at: str
-    source_url: str
-    grounding_notes: str
+    updated_at: Optional[str] = None
+    source_url: Optional[str] = ""
+    grounding_notes: Optional[str] = ""
     verified_facts_used: List[str] = Field(default_factory=list)
+    discovery_source: Optional[str] = ""
+    discovery_query: Optional[str] = ""
+    relevance_explanation: Optional[str] = ""
+    flagged_for_manual_review: bool = False
+    manual_review_reason: Optional[str] = None
+
 
 class OutreachDraftResponse(BaseModel):
     drafts: List[OutreachDraft]
@@ -310,4 +317,31 @@ class SearchProvidersResponse(BaseModel):
 class TransferToOutreachRequest(BaseModel):
     job_id: str
     lead_ids: List[str] = Field(default_factory=list, description="IDs of discovered leads to transfer to outreach")
+    service_offering: Optional[str] = Field(default="Custom software development, IoT systems, and cloud architecture", description="Service offering or value proposition")
+    tone: Optional[str] = Field(default="professional", description="Outreach tone")
+    sender_name: Optional[str] = Field(default="AgentDesk Operator", description="Sender name")
+    sender_company: Optional[str] = Field(default="AgentDesk", description="Sender organization")
+    ai_config: Optional[AIProviderConfig] = Field(default=None, description="AI provider configuration")
+    prevent_duplicates: bool = Field(default=True, description="Skip generating duplicate drafts for leads already drafted")
 
+class LeadTransferResponse(OutreachDraftResponse):
+    created_count: int = 0
+    skipped_count: int = 0
+    failed_count: int = 0
+    messages: List[str] = Field(default_factory=list)
+
+class UpdateDraftRequest(BaseModel):
+    subject: Optional[str] = None
+    body: Optional[str] = None
+    recipient_name: Optional[str] = None
+
+class DiscardDraftRequest(BaseModel):
+    reason: Optional[str] = None
+
+class OutreachDraftsListResponse(BaseModel):
+    drafts: List[OutreachDraft]
+    total: int
+    page: int
+    page_size: int
+    total_pages: int
+    counts_by_status: dict = Field(default_factory=dict)

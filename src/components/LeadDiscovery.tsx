@@ -149,6 +149,7 @@ export const LeadDiscovery: React.FC<LeadDiscoveryProps> = ({
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [successMessage, setSuccessMessage] = useState<string | null>(null);
   const [isTransferring, setIsTransferring] = useState<boolean>(false);
+  const [transferringLeadId, setTransferringLeadId] = useState<string | null>(null);
 
   // Selected Provider Info
   const currentProviderInfo = useMemo(() => {
@@ -308,23 +309,44 @@ export const LeadDiscovery: React.FC<LeadDiscoveryProps> = ({
     }
   };
 
-  // Transfer selected leads to Outreach
-  const handleTransferToOutreach = async () => {
-    if (!activeJob || selectedLeadIds.size === 0) return;
+  // Transfer leads to personalized Outreach Drafts (supports single and bulk)
+  const handleTransferLeads = async (leadIds: string[], companyLabel?: string) => {
+    if (!activeJob || leadIds.length === 0) return;
     setIsTransferring(true);
+    if (leadIds.length === 1) {
+      setTransferringLeadId(leadIds[0]);
+    }
     setErrorMessage(null);
     try {
-      const res = await transferLeadsToOutreach(activeJob.id, Array.from(selectedLeadIds));
-      setSuccessMessage(
-        `Successfully transferred ${res.total} leads to Outreach (${res.verified_email_count} verified emails). Opening Outreach Console...`
-      );
-      if (onNavigateToOutreach) {
-        setTimeout(() => onNavigateToOutreach(), 1100);
-      }
+      const res = await transferLeadsToOutreach(activeJob.id, leadIds, {
+        serviceOffering: "Custom software development, IoT systems, and cloud architecture",
+        tone: "professional",
+        preventDuplicates: true,
+      });
+
+      const counts = [];
+      if (res.created_count > 0) counts.push(`${res.created_count} created`);
+      if (res.skipped_count > 0) counts.push(`${res.skipped_count} skipped (duplicate)`);
+      if (res.failed_count > 0) counts.push(`${res.failed_count} failed`);
+
+      const countSummary = counts.length > 0 ? counts.join(', ') : `${res.total} processed`;
+      const msg = companyLabel
+        ? `Outreach Draft for "${companyLabel}": ${countSummary} (${res.verified_email_count} verified emails).`
+        : `Transfer complete: ${countSummary} (${res.verified_email_count} verified emails).`;
+
+      setSuccessMessage(msg);
+
+      // Deselect transferred leads
+      setSelectedLeadIds((prev) => {
+        const next = new Set(prev);
+        leadIds.forEach((id) => next.delete(id));
+        return next;
+      });
     } catch (err: unknown) {
-      setErrorMessage(err instanceof Error ? err.message : 'Failed to transfer leads.');
+      setErrorMessage(err instanceof Error ? err.message : 'Failed to transfer lead(s) to outreach.');
     } finally {
       setIsTransferring(false);
+      setTransferringLeadId(null);
     }
   };
 
@@ -479,9 +501,27 @@ export const LeadDiscovery: React.FC<LeadDiscoveryProps> = ({
             </div>
           )}
           {successMessage && (
-            <div className="alert alert-success" style={{ margin: 0, padding: '0.65rem 0.95rem', fontSize: '0.8rem', display: 'flex', alignItems: 'center', gap: '0.6rem' }}>
+            <div className="alert alert-success" style={{ margin: 0, padding: '0.65rem 0.95rem', fontSize: '0.8rem', display: 'flex', alignItems: 'center', gap: '0.6rem', flexWrap: 'wrap' }}>
               <CheckCircleIcon size={16} />
-              <span style={{ flex: 1 }}>{successMessage}</span>
+              <span style={{ flex: 1, minWidth: '180px' }}>{successMessage}</span>
+              {onNavigateToOutreach && (
+                <button
+                  type="button"
+                  className="btn btn-secondary"
+                  onClick={onNavigateToOutreach}
+                  style={{
+                    fontSize: '0.74rem',
+                    padding: '0.25rem 0.65rem',
+                    whiteSpace: 'nowrap',
+                    background: 'rgba(52, 211, 153, 0.15)',
+                    borderColor: 'rgba(52, 211, 153, 0.35)',
+                    color: '#34d399',
+                    cursor: 'pointer',
+                  }}
+                >
+                  Open Outreach Console &rarr;
+                </button>
+              )}
               <button
                 onClick={() => setSuccessMessage(null)}
                 style={{ background: 'transparent', border: 'none', cursor: 'pointer', color: 'inherit' }}
@@ -1072,13 +1112,15 @@ export const LeadDiscovery: React.FC<LeadDiscoveryProps> = ({
             <button
               type="button"
               className="btn btn-primary"
-              onClick={handleTransferToOutreach}
+              onClick={() => handleTransferLeads(Array.from(selectedLeadIds))}
               disabled={isTransferring || selectedLeadIds.size === 0}
               style={{ display: 'flex', alignItems: 'center', gap: '0.45rem', fontSize: '0.8rem', fontWeight: 600 }}
-              title="Transfer selected leads to Outreach Console for drafting"
+              title="Generate personalized software development outreach drafts for selected leads"
             >
               <SendIcon size={14} />
-              {isTransferring ? 'Transferring...' : `Transfer to Outreach (${selectedLeadIds.size})`}
+              {isTransferring && !transferringLeadId
+                ? 'Creating Drafts...'
+                : `Create Drafts for Selected Leads (${selectedLeadIds.size})`}
             </button>
           </div>
         </div>
@@ -1219,15 +1261,42 @@ export const LeadDiscovery: React.FC<LeadDiscoveryProps> = ({
                       </td>
 
                       <td style={{ textAlign: 'right' }}>
-                        <button
-                          type="button"
-                          className="btn btn-secondary"
-                          onClick={() => setEvidenceLead(lead)}
-                          style={{ padding: '0.3rem 0.65rem', fontSize: '0.74rem', display: 'inline-flex', alignItems: 'center', gap: '0.35rem' }}
-                          title="View verified source evidence and facts"
-                        >
-                          <EyeIcon size={12} /> Evidence
-                        </button>
+                        <div style={{ display: 'inline-flex', alignItems: 'center', justifyContent: 'flex-end', gap: '0.4rem' }}>
+                          <button
+                            type="button"
+                            className="btn btn-primary"
+                            onClick={() => handleTransferLeads([lead.id], lead.company_name)}
+                            disabled={isTransferring && transferringLeadId === lead.id}
+                            style={{
+                              padding: '0.3rem 0.65rem',
+                              fontSize: '0.74rem',
+                              display: 'inline-flex',
+                              alignItems: 'center',
+                              gap: '0.35rem',
+                              fontWeight: 600,
+                            }}
+                            title="Generate personalized software development outreach draft for this lead"
+                          >
+                            {isTransferring && transferringLeadId === lead.id ? (
+                              <>
+                                <RefreshCwIcon size={11} className="spin" /> Drafting...
+                              </>
+                            ) : (
+                              <>
+                                <SendIcon size={11} /> Create Draft
+                              </>
+                            )}
+                          </button>
+                          <button
+                            type="button"
+                            className="btn btn-secondary"
+                            onClick={() => setEvidenceLead(lead)}
+                            style={{ padding: '0.3rem 0.65rem', fontSize: '0.74rem', display: 'inline-flex', alignItems: 'center', gap: '0.35rem' }}
+                            title="View verified source evidence and facts"
+                          >
+                            <EyeIcon size={12} /> Evidence
+                          </button>
+                        </div>
                       </td>
                     </tr>
                   );
@@ -1428,9 +1497,21 @@ export const LeadDiscovery: React.FC<LeadDiscoveryProps> = ({
               </div>
             </div>
 
-            <div style={{ marginTop: '1.75rem', display: 'flex', justifyContent: 'flex-end' }}>
+            <div style={{ marginTop: '1.75rem', display: 'flex', justifyContent: 'flex-end', gap: '0.65rem', alignItems: 'center' }}>
               <button type="button" className="btn btn-secondary" onClick={() => setEvidenceLead(null)}>
                 Close Evidence
+              </button>
+              <button
+                type="button"
+                className="btn btn-primary"
+                onClick={() => {
+                  handleTransferLeads([evidenceLead.id], evidenceLead.company_name);
+                }}
+                disabled={isTransferring}
+                style={{ display: 'inline-flex', alignItems: 'center', gap: '0.45rem', fontWeight: 600 }}
+              >
+                <SendIcon size={14} />
+                {isTransferring && transferringLeadId === evidenceLead.id ? 'Drafting...' : 'Create Outreach Draft'}
               </button>
             </div>
           </div>

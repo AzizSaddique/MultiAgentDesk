@@ -1227,7 +1227,22 @@ export const OutreachHistory: React.FC<OutreachHistoryProps> = ({
             </div>
 
             {/* Modal Footer */}
-            <div style={{ display: 'flex', justifyContent: 'flex-end', borderTop: '1px solid var(--border-subtle)', paddingTop: '0.75rem' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', borderTop: '1px solid var(--border-subtle)', paddingTop: '0.75rem' }}>
+              <div>
+                {(selectedItem.status === 'drafted' || selectedItem.status === 'approved') && onNavigateToConsole && (
+                  <button
+                    type="button"
+                    className="btn btn-primary"
+                    onClick={() => {
+                      setSelectedItem(null);
+                      onNavigateToConsole();
+                    }}
+                    style={{ fontSize: '0.74rem', padding: '0.35rem 0.75rem' }}
+                  >
+                    Open in Outreach Console &rarr;
+                  </button>
+                )}
+              </div>
               <button
                 type="button"
                 className="btn btn-secondary"

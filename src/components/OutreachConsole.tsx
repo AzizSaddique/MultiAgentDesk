@@ -11,6 +11,10 @@ import {
   fetchAIProviders,
   draftOutreach,
   sendOutreach,
+  fetchOutreachDrafts,
+  updateOutreachDraft,
+  approveOutreachDraft,
+  discardOutreachDraft,
 } from '../services/api';
 import {
   MailIcon,
@@ -28,6 +32,7 @@ import {
   SettingsIcon,
   BuildingIcon,
   HistoryIcon,
+  SearchIcon,
 } from './icons';
 
 interface OutreachConsoleProps {
@@ -76,6 +81,15 @@ export const OutreachConsole: React.FC<OutreachConsoleProps> = ({
   const [draftError, setDraftError] = useState<string | null>(null);
   const [copiedDraftId, setCopiedDraftId] = useState<string | null>(null);
 
+  // Persistence & Draft Management Filters State
+  const [draftStatusFilter, setDraftStatusFilter] = useState<string>('all');
+  const [draftSearchFilter, setDraftSearchFilter] = useState<string>('');
+  const [isLoadingDrafts, setIsLoadingDrafts] = useState<boolean>(false);
+  const [savingDraftId, setSavingDraftId] = useState<string | null>(null);
+  const [discardingDraftId, setDiscardingDraftId] = useState<string | null>(null);
+  const [savedSuccessId, setSavedSuccessId] = useState<string | null>(null);
+  const [dirtyDraftIds, setDirtyDraftIds] = useState<Set<string>>(new Set());
+
   // Send Confirmation Modal State
   const [confirmModalDraft, setConfirmModalDraft] = useState<OutreachDraft | null>(null);
   const [isSending, setIsSending] = useState<boolean>(false);
@@ -96,17 +110,47 @@ export const OutreachConsole: React.FC<OutreachConsoleProps> = ({
     }
   }, []);
 
+  // Load persisted drafts from SQLite storage
+  const loadPersistedDrafts = useCallback(async () => {
+    setIsLoadingDrafts(true);
+    try {
+      const res = await fetchOutreachDrafts(
+        draftStatusFilter === 'all' || draftStatusFilter === 'flagged' ? undefined : draftStatusFilter,
+        draftSearchFilter.trim() || undefined,
+        1,
+        100
+      );
+      if (res && res.drafts) {
+        if (draftStatusFilter === 'flagged') {
+          setDrafts(res.drafts.filter((d) => d.flagged_for_manual_review));
+        } else {
+          setDrafts(res.drafts);
+        }
+      }
+    } catch {
+      // keep existing drafts
+    } finally {
+      setIsLoadingDrafts(false);
+    }
+  }, [draftStatusFilter, draftSearchFilter]);
+
   // Load available providers and dispatch status on mount
   useEffect(() => {
     refreshDispatchStatus();
   }, [refreshDispatchStatus]);
 
+  // Load drafts on mount or when filters change
+  useEffect(() => {
+    loadPersistedDrafts();
+  }, [loadPersistedDrafts]);
+
   // Automatically refresh when backend restarts or transitions to online
   useEffect(() => {
     if (backendStatus?.isOnline) {
       refreshDispatchStatus();
+      loadPersistedDrafts();
     }
-  }, [backendStatus?.isOnline, refreshDispatchStatus]);
+  }, [backendStatus?.isOnline, refreshDispatchStatus, loadPersistedDrafts]);
 
   // Update parent with pending drafts count
   useEffect(() => {
@@ -197,24 +241,75 @@ export const OutreachConsole: React.FC<OutreachConsoleProps> = ({
         return d;
       })
     );
+    setDirtyDraftIds((prev) => new Set(prev).add(draftId));
+  };
+
+  // Save draft changes to database
+  const handleSaveDraft = async (draft: OutreachDraft) => {
+    setSavingDraftId(draft.id);
+    setDraftError(null);
+    try {
+      const updated = await updateOutreachDraft(draft.id, {
+        subject: draft.subject,
+        body: draft.body,
+        recipient_name: draft.recipient_name,
+      });
+      setDrafts((prev) => prev.map((d) => (d.id === draft.id ? updated : d)));
+      setDirtyDraftIds((prev) => {
+        const next = new Set(prev);
+        next.delete(draft.id);
+        return next;
+      });
+      setSavedSuccessId(draft.id);
+      setTimeout(() => setSavedSuccessId(null), 2500);
+      onLogAudit?.('info', `Draft for "${draft.company_name}" saved.`);
+    } catch (err: unknown) {
+      setDraftError(err instanceof Error ? err.message : 'Failed to save draft.');
+    } finally {
+      setSavingDraftId(null);
+    }
+  };
+
+  // Explicit approval action
+  const handleApproveDraft = async (draft: OutreachDraft) => {
+    if (!draft.has_verified_email) {
+      setDraftError(`Cannot approve ${draft.company_name}: No verified public email address.`);
+      return;
+    }
+    setDraftError(null);
+    try {
+      const approved = await approveOutreachDraft(draft.id);
+      setDrafts((prev) => prev.map((d) => (d.id === draft.id ? approved : d)));
+      onLogAudit?.('info', `Draft for "${draft.company_name}" explicitly approved for dispatch.`);
+    } catch (err: unknown) {
+      setDraftError(err instanceof Error ? err.message : 'Failed to approve draft.');
+    }
+  };
+
+  // Discard draft action
+  const handleDiscardDraft = async (draft: OutreachDraft) => {
+    setDiscardingDraftId(draft.id);
+    setDraftError(null);
+    try {
+      const discarded = await discardOutreachDraft(draft.id, 'Discarded by operator during review.');
+      setDrafts((prev) => prev.map((d) => (d.id === draft.id ? discarded : d)));
+      onLogAudit?.('info', `Draft for "${draft.company_name}" discarded.`);
+    } catch (err: unknown) {
+      setDraftError(err instanceof Error ? err.message : 'Failed to discard draft.');
+    } finally {
+      setDiscardingDraftId(null);
+    }
   };
 
   // Toggle approval state
-  const handleToggleApproval = (draftId: string) => {
-    setDrafts((prev) =>
-      prev.map((d) => {
-        if (d.id === draftId) {
-          if (!d.has_verified_email) return d; // Cannot approve leads without verified email
-          const newStatus = d.status === 'approved' ? 'drafted' : 'approved';
-          onLogAudit?.(
-            'info',
-            `Lead "${d.company_name}" draft marked as ${newStatus.toUpperCase()} by operator.`
-          );
-          return { ...d, status: newStatus };
-        }
-        return d;
-      })
-    );
+  const handleToggleApproval = async (draftId: string) => {
+    const target = drafts.find((d) => d.id === draftId);
+    if (!target) return;
+    if (target.status === 'approved') {
+      handleDiscardDraft(target);
+    } else {
+      handleApproveDraft(target);
+    }
   };
 
   // Copy draft to clipboard
@@ -287,6 +382,7 @@ export const OutreachConsole: React.FC<OutreachConsoleProps> = ({
       setSendSuccessMessage(msg);
       onLogAudit?.(isSim ? 'info' : 'success', msg);
       setConfirmModalDraft(null);
+      await loadPersistedDrafts();
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : 'Outbound transmission failed';
       setSendErrorMessage(msg);
@@ -857,291 +953,491 @@ export const OutreachConsole: React.FC<OutreachConsoleProps> = ({
       )}
 
       {/* Drafts Review Workspace */}
-      {!isDrafting && drafts.length > 0 && (
+      {/* Drafts Review Workspace */}
+      {!isDrafting && (
         <div style={{ marginTop: '1.5rem', display: 'flex', flexDirection: 'column', gap: '1.25rem' }}>
-          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: '0.5rem' }}>
-            <span style={{ fontSize: '0.85rem', fontWeight: 700, color: 'var(--text-primary)' }}>
-              Generated Outreach Drafts ({drafts.length})
-            </span>
-            <span style={{ fontSize: '0.72rem', color: 'var(--text-muted)' }}>
-              Operator Review & Editing Mode: Edit subject and body directly, then approve for sending
-            </span>
+          {/* Drafts Toolbar: Filter Tabs & Search */}
+          <div
+            style={{
+              background: 'rgba(15, 23, 42, 0.75)',
+              border: '1px solid var(--border-subtle)',
+              borderRadius: '8px',
+              padding: '0.85rem 1rem',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'space-between',
+              flexWrap: 'wrap',
+              gap: '0.75rem',
+            }}
+          >
+            {/* Status Tabs */}
+            <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', flexWrap: 'wrap' }}>
+              {[
+                { id: 'all', label: 'All Drafts' },
+                { id: 'drafted', label: 'Needs Review' },
+                { id: 'approved', label: 'Approved' },
+                { id: 'flagged', label: 'Flagged for Research' },
+                { id: 'sent', label: 'Sent' },
+                { id: 'rejected', label: 'Discarded' },
+              ].map((tab) => {
+                const isActive = draftStatusFilter === tab.id;
+                return (
+                  <button
+                    key={tab.id}
+                    type="button"
+                    onClick={() => setDraftStatusFilter(tab.id)}
+                    style={{
+                      background: isActive ? 'var(--accent-cyan)' : 'transparent',
+                      color: isActive ? '#0b1120' : 'var(--text-secondary)',
+                      border: isActive ? 'none' : '1px solid var(--border-subtle)',
+                      fontWeight: isActive ? 700 : 500,
+                      fontSize: '0.74rem',
+                      padding: '0.35rem 0.75rem',
+                      borderRadius: '6px',
+                      cursor: 'pointer',
+                      transition: 'all 0.15s ease',
+                    }}
+                  >
+                    {tab.label}
+                  </button>
+                );
+              })}
+            </div>
+
+            {/* Search & Refresh */}
+            <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', flex: 1, maxWidth: '380px', minWidth: '220px' }}>
+              <div style={{ position: 'relative', width: '100%' }}>
+                <SearchIcon
+                  size={14}
+                  color="var(--text-muted)"
+                  style={{ position: 'absolute', left: '0.65rem', top: '50%', transform: 'translateY(-50%)' }}
+                />
+                <input
+                  type="text"
+                  className="form-input"
+                  placeholder="Search drafts by company or email..."
+                  value={draftSearchFilter}
+                  onChange={(e) => setDraftSearchFilter(e.target.value)}
+                  style={{
+                    paddingLeft: '2rem',
+                    fontSize: '0.76rem',
+                    height: '32px',
+                    width: '100%',
+                  }}
+                />
+              </div>
+
+              <button
+                type="button"
+                className="btn btn-secondary"
+                onClick={loadPersistedDrafts}
+                disabled={isLoadingDrafts}
+                title="Refresh drafts from persistent storage"
+                style={{ fontSize: '0.74rem', padding: '0.35rem 0.65rem', whiteSpace: 'nowrap', height: '32px' }}
+              >
+                <RefreshCwIcon size={12} className={isLoadingDrafts ? 'spin' : ''} color="var(--accent-cyan)" />
+                Refresh
+              </button>
+            </div>
           </div>
 
-          {drafts.map((draft) => {
-            const isApproved = draft.status === 'approved';
-            const isSent = draft.status === 'sent';
-            const hasVerifiedEmail = draft.has_verified_email;
+          {/* Empty filtered list */}
+          {drafts.length === 0 ? (
+            <div
+              style={{
+                background: 'rgba(10, 14, 23, 0.4)',
+                border: '1px dashed var(--border-subtle)',
+                borderRadius: '8px',
+                padding: '2.5rem 1.5rem',
+                textAlign: 'center',
+                color: 'var(--text-muted)',
+              }}
+            >
+              <MailIcon size={32} color="var(--border-subtle)" />
+              <p style={{ marginTop: '0.75rem', fontWeight: 600, color: 'var(--text-secondary)', fontSize: '0.85rem' }}>
+                No drafts found for filter &quot;{draftStatusFilter}&quot;
+              </p>
+              <span style={{ fontSize: '0.75rem' }}>
+                Generate new drafts from discovered leads above or select a different filter.
+              </span>
+            </div>
+          ) : (
+            drafts.map((draft) => {
+              const isApproved = draft.status === 'approved';
+              const isSent = draft.status === 'sent';
+              const isDiscarded = draft.status === 'rejected';
+              const hasVerifiedEmail = draft.has_verified_email;
+              const isDirty = dirtyDraftIds.has(draft.id);
+              const isSaving = savingDraftId === draft.id;
+              const isJustSaved = savedSuccessId === draft.id;
 
-            return (
-              <div
-                key={draft.id}
-                className="outreach-draft-card"
-                style={{
-                  background: 'rgba(15, 23, 42, 0.75)',
-                  border: isSent
-                    ? '1px solid rgba(99, 102, 241, 0.4)'
-                    : isApproved
-                    ? '1px solid rgba(16, 185, 129, 0.4)'
-                    : '1px solid var(--border-subtle)',
-                  borderRadius: '10px',
-                  padding: '1.25rem',
-                  display: 'flex',
-                  flexDirection: 'column',
-                  gap: '0.85rem',
-                  transition: 'border-color 0.2s ease',
-                }}
-              >
-                {/* Draft Card Header */}
-                <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', flexWrap: 'wrap', gap: '0.75rem' }}>
-                  <div>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', flexWrap: 'wrap' }}>
-                      <span style={{ fontSize: '0.95rem', fontWeight: 700, color: 'var(--text-primary)', display: 'flex', alignItems: 'center', gap: '0.35rem' }}>
-                        <BuildingIcon size={14} color="var(--accent-cyan)" />
-                        {draft.company_name}
-                      </span>
-
-                      {/* Status Badge */}
-                      {isSent ? (
-                        <span
-                          className={draft.grounding_notes?.includes('simulation') ? 'badge badge-warning' : 'badge badge-cyan'}
-                          style={{ fontSize: '0.65rem' }}
-                        >
-                          <CheckCircleIcon size={10} color={draft.grounding_notes?.includes('simulation') ? '#fbbf24' : 'var(--accent-cyan)'} />
-                          {draft.grounding_notes?.includes('simulation') ? 'Dispatched (Simulation)' : 'Dispatched (Live Provider)'}
-                        </span>
-                      ) : isApproved ? (
-                        <span className="badge badge-active" style={{ fontSize: '0.65rem' }}>
-                          <CheckIcon size={10} color="#34d399" />
-                          Approved
-                        </span>
-                      ) : (
-                        <span className="badge badge-warning" style={{ fontSize: '0.65rem' }}>
-                          Draft (Pending Review)
-                        </span>
-                      )}
-
-                      {/* Verified Email Badge */}
-                      {hasVerifiedEmail ? (
-                        <span
-                          className="tag-verified"
-                          style={{ display: 'inline-flex', alignItems: 'center', gap: '0.25rem' }}
-                          title={`Recipient Email: ${draft.recipient_email}`}
-                        >
-                          <CheckCircleIcon size={10} color="#34d399" />
-                          Verified Email: {draft.recipient_email}
-                        </span>
-                      ) : (
-                        <span
-                          className="tag-unverified"
-                          style={{
-                            display: 'inline-flex',
-                            alignItems: 'center',
-                            gap: '0.25rem',
-                            color: '#fbbf24',
-                            borderColor: 'rgba(245, 158, 11, 0.3)',
-                            background: 'rgba(245, 158, 11, 0.1)',
-                          }}
-                          title="No verified email extracted from public web source"
-                        >
-                          <AlertTriangleIcon size={10} color="#fbbf24" />
-                          No Public Email Listed (Dispatch Blocked)
-                        </span>
-                      )}
-                    </div>
-
-                    <div style={{ fontSize: '0.72rem', color: 'var(--text-muted)', display: 'flex', alignItems: 'center', gap: '0.5rem', marginTop: '0.25rem' }}>
-                      <span>Recipient: {draft.recipient_name}</span>
-                      {draft.source_url && draft.source_url.startsWith('http') && (
-                        <>
-                          <span>&bull;</span>
-                          <a
-                            href={draft.source_url}
-                            target="_blank"
-                            rel="noopener noreferrer"
-                            className="lead-link"
-                            style={{ fontSize: '0.72rem' }}
-                          >
-                            Source Page
-                            <ExternalLinkIcon size={10} color="var(--accent-cyan)" />
-                          </a>
-                        </>
-                      )}
-                    </div>
-                  </div>
-
-                  {/* Top Right Quick Actions */}
-                  <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-                    <button
-                      type="button"
-                      className="btn btn-secondary"
-                      onClick={() => handleCopyDraft(draft)}
-                      style={{ fontSize: '0.72rem', padding: '0.3rem 0.65rem' }}
-                      title="Copy subject and body to clipboard"
-                    >
-                      {copiedDraftId === draft.id ? (
-                        <>
-                          <CheckIcon size={12} color="#34d399" />
-                          Copied!
-                        </>
-                      ) : (
-                        <>
-                          <CopyIcon size={12} color="var(--text-secondary)" />
-                          Copy Draft
-                        </>
-                      )}
-                    </button>
-                  </div>
-                </div>
-
-                {/* Grounding Facts Notice */}
-                {draft.verified_facts_used && draft.verified_facts_used.length > 0 && (
-                  <div
-                    style={{
-                      display: 'flex',
-                      alignItems: 'center',
-                      gap: '0.4rem',
-                      flexWrap: 'wrap',
-                      background: 'rgba(10, 14, 23, 0.5)',
-                      padding: '0.35rem 0.6rem',
-                      borderRadius: '6px',
-                      fontSize: '0.68rem',
-                    }}
-                  >
-                    <span style={{ color: 'var(--text-muted)' }}>Verified Facts Used:</span>
-                    {draft.verified_facts_used.map((fact, idx) => (
-                      <span key={idx} className="tag-verified" style={{ fontSize: '0.6rem' }}>
-                        {fact}
-                      </span>
-                    ))}
-                    <span style={{ color: 'var(--text-muted)', marginLeft: 'auto' }}>
-                      {draft.grounding_notes}
-                    </span>
-                  </div>
-                )}
-
-                {/* Missing Email Warning Banner */}
-                {!hasVerifiedEmail && (
-                  <div
-                    style={{
-                      background: 'rgba(245, 158, 11, 0.08)',
-                      border: '1px dashed rgba(245, 158, 11, 0.3)',
-                      borderRadius: '6px',
-                      padding: '0.5rem 0.75rem',
-                      fontSize: '0.72rem',
-                      color: '#fbbf24',
-                      display: 'flex',
-                      alignItems: 'center',
-                      gap: '0.4rem',
-                    }}
-                  >
-                    <AlertTriangleIcon size={13} color="#fbbf24" />
-                    <span>
-                      <strong>Safety Lock Engaged:</strong> This lead has no verified public email address. Sending is permanently blocked on backend and UI to prevent unsolicited delivery or hallucinated addresses. You can copy the customized body above for manual contact via the target website&apos;s web form.
-                    </span>
-                  </div>
-                )}
-
-                {/* Editable Subject Field */}
-                <div className="form-group">
-                  <label className="form-label" style={{ fontSize: '0.72rem' }}>
-                    <EditIcon size={11} color="var(--accent-cyan)" />
-                    Subject Line (Editable):
-                  </label>
-                  <input
-                    type="text"
-                    className="form-input"
-                    value={draft.subject}
-                    onChange={(e) => handleUpdateDraft(draft.id, 'subject', e.target.value)}
-                    disabled={isSent}
-                    style={{ fontFamily: 'var(--font-sans)', fontSize: '0.8rem', fontWeight: 600 }}
-                  />
-                </div>
-
-                {/* Editable Body Field */}
-                <div className="form-group">
-                  <label className="form-label" style={{ fontSize: '0.72rem' }}>
-                    <EditIcon size={11} color="var(--accent-cyan)" />
-                    Email Body (Editable & Personalized):
-                  </label>
-                  <textarea
-                    className="form-input"
-                    rows={7}
-                    value={draft.body}
-                    onChange={(e) => handleUpdateDraft(draft.id, 'body', e.target.value)}
-                    disabled={isSent}
-                    style={{
-                      fontFamily: 'var(--font-mono)',
-                      fontSize: '0.75rem',
-                      lineHeight: 1.5,
-                      resize: 'vertical',
-                      whiteSpace: 'pre-wrap',
-                    }}
-                  />
-                </div>
-
-                {/* Operator Safety Controls & Send Action */}
+              return (
                 <div
+                  key={draft.id}
+                  className="outreach-draft-card"
                   style={{
+                    background: 'rgba(15, 23, 42, 0.75)',
+                    border: isSent
+                      ? '1px solid rgba(99, 102, 241, 0.4)'
+                      : isApproved
+                      ? '1px solid rgba(16, 185, 129, 0.4)'
+                      : isDiscarded
+                      ? '1px solid rgba(239, 68, 68, 0.3)'
+                      : draft.flagged_for_manual_review
+                      ? '1px solid rgba(245, 158, 11, 0.5)'
+                      : '1px solid var(--border-subtle)',
+                    borderRadius: '10px',
+                    padding: '1.25rem',
                     display: 'flex',
-                    alignItems: 'center',
-                    justifyContent: 'space-between',
-                    flexWrap: 'wrap',
-                    gap: '0.75rem',
-                    paddingTop: '0.5rem',
-                    borderTop: '1px solid var(--border-subtle)',
+                    flexDirection: 'column',
+                    gap: '0.85rem',
+                    transition: 'border-color 0.2s ease',
                   }}
                 >
-                  {/* Operator Approval Toggle */}
-                  <label
+                  {/* Draft Card Header */}
+                  <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', flexWrap: 'wrap', gap: '0.75rem' }}>
+                    <div>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', flexWrap: 'wrap' }}>
+                        <span style={{ fontSize: '0.95rem', fontWeight: 700, color: 'var(--text-primary)', display: 'flex', alignItems: 'center', gap: '0.35rem' }}>
+                          <BuildingIcon size={14} color="var(--accent-cyan)" />
+                          {draft.company_name}
+                        </span>
+
+                        {/* Status Badge */}
+                        {isSent ? (
+                          <span
+                            className={draft.grounding_notes?.includes('simulation') ? 'badge badge-warning' : 'badge badge-cyan'}
+                            style={{ fontSize: '0.65rem' }}
+                          >
+                            <CheckCircleIcon size={10} color={draft.grounding_notes?.includes('simulation') ? '#fbbf24' : 'var(--accent-cyan)'} />
+                            {draft.grounding_notes?.includes('simulation') ? 'Dispatched (Simulation)' : 'Dispatched (Live Provider)'}
+                          </span>
+                        ) : isApproved ? (
+                          <span className="badge badge-active" style={{ fontSize: '0.65rem' }}>
+                            <CheckIcon size={10} color="#34d399" />
+                            Approved
+                          </span>
+                        ) : isDiscarded ? (
+                          <span className="badge badge-offline" style={{ fontSize: '0.65rem' }}>
+                            <XIcon size={10} />
+                            Discarded
+                          </span>
+                        ) : (
+                          <span className="badge badge-warning" style={{ fontSize: '0.65rem' }}>
+                            Draft (Pending Review)
+                          </span>
+                        )}
+
+                        {/* Verified Email Badge */}
+                        {hasVerifiedEmail ? (
+                          <span
+                            className="tag-verified"
+                            style={{ display: 'inline-flex', alignItems: 'center', gap: '0.25rem' }}
+                            title={`Recipient Email: ${draft.recipient_email}`}
+                          >
+                            <CheckCircleIcon size={10} color="#34d399" />
+                            Verified Email: {draft.recipient_email}
+                          </span>
+                        ) : (
+                          <span
+                            className="tag-unverified"
+                            style={{
+                              display: 'inline-flex',
+                              alignItems: 'center',
+                              gap: '0.25rem',
+                              color: '#fbbf24',
+                              borderColor: 'rgba(245, 158, 11, 0.3)',
+                              background: 'rgba(245, 158, 11, 0.1)',
+                            }}
+                            title="No verified email extracted from public web source"
+                          >
+                            <AlertTriangleIcon size={10} color="#fbbf24" />
+                            No Public Email Listed (Dispatch Blocked)
+                          </span>
+                        )}
+                      </div>
+
+                      <div style={{ fontSize: '0.72rem', color: 'var(--text-muted)', display: 'flex', alignItems: 'center', gap: '0.5rem', marginTop: '0.25rem' }}>
+                        <span>Recipient: {draft.recipient_name}</span>
+                        {draft.source_url && draft.source_url.startsWith('http') && (
+                          <>
+                            <span>&bull;</span>
+                            <a
+                              href={draft.source_url}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="lead-link"
+                              style={{ fontSize: '0.72rem' }}
+                            >
+                              Source Page
+                              <ExternalLinkIcon size={10} color="var(--accent-cyan)" />
+                            </a>
+                          </>
+                        )}
+                      </div>
+                    </div>
+
+                    {/* Top Right Quick Actions */}
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                      <button
+                        type="button"
+                        className="btn btn-secondary"
+                        onClick={() => handleCopyDraft(draft)}
+                        style={{ fontSize: '0.72rem', padding: '0.3rem 0.65rem' }}
+                        title="Copy subject and body to clipboard"
+                      >
+                        {copiedDraftId === draft.id ? (
+                          <>
+                            <CheckIcon size={12} color="#34d399" />
+                            Copied!
+                          </>
+                        ) : (
+                          <>
+                            <CopyIcon size={12} color="var(--text-secondary)" />
+                            Copy Draft
+                          </>
+                        )}
+                      </button>
+                    </div>
+                  </div>
+
+                  {/* Flagged for Manual Research Banner */}
+                  {draft.flagged_for_manual_review && (
+                    <div
+                      style={{
+                        background: 'rgba(245, 158, 11, 0.09)',
+                        border: '1px solid rgba(245, 158, 11, 0.35)',
+                        borderRadius: '6px',
+                        padding: '0.6rem 0.85rem',
+                        fontSize: '0.76rem',
+                        color: '#fbbf24',
+                        display: 'flex',
+                        alignItems: 'flex-start',
+                        gap: '0.5rem',
+                      }}
+                    >
+                      <AlertTriangleIcon size={15} color="#fbbf24" style={{ flexShrink: 0, marginTop: '2px' }} />
+                      <div>
+                        <strong>Flagged for Manual Research:</strong>{' '}
+                        {draft.manual_review_reason || 'Insufficient public evidence extracted for this company. Verify business scope and public contacts before approving.'}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Grounding & Evidence Used Box */}
+                  <div
+                    style={{
+                      background: 'rgba(10, 14, 23, 0.55)',
+                      border: '1px solid var(--border-subtle)',
+                      borderRadius: '6px',
+                      padding: '0.6rem 0.85rem',
+                      fontSize: '0.74rem',
+                      display: 'flex',
+                      flexDirection: 'column',
+                      gap: '0.4rem',
+                    }}
+                  >
+                    {draft.relevance_explanation && (
+                      <div style={{ color: 'var(--text-primary)', lineHeight: 1.4 }}>
+                        <strong style={{ color: 'var(--accent-cyan)' }}>Software Development Relevance:</strong>{' '}
+                        {draft.relevance_explanation}
+                      </div>
+                    )}
+
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', flexWrap: 'wrap' }}>
+                      <span style={{ color: 'var(--text-muted)' }}>Public Evidence Used:</span>
+                      {draft.verified_facts_used && draft.verified_facts_used.map((fact, idx) => (
+                        <span key={idx} className="tag-verified" style={{ fontSize: '0.65rem' }}>
+                          {fact}
+                        </span>
+                      ))}
+                      {draft.discovery_source && (
+                        <span className="badge badge-cyan" style={{ fontSize: '0.62rem' }}>
+                          Source: {draft.discovery_source}
+                        </span>
+                      )}
+                      {draft.discovery_query && (
+                        <span style={{ color: 'var(--text-muted)', fontSize: '0.68rem', fontFamily: 'var(--font-mono)' }}>
+                          &quot;{draft.discovery_query}&quot;
+                        </span>
+                      )}
+                    </div>
+                  </div>
+
+                  {/* Missing Email Warning Banner */}
+                  {!hasVerifiedEmail && (
+                    <div
+                      style={{
+                        background: 'rgba(245, 158, 11, 0.08)',
+                        border: '1px dashed rgba(245, 158, 11, 0.3)',
+                        borderRadius: '6px',
+                        padding: '0.5rem 0.75rem',
+                        fontSize: '0.72rem',
+                        color: '#fbbf24',
+                        display: 'flex',
+                        alignItems: 'center',
+                        gap: '0.4rem',
+                      }}
+                    >
+                      <AlertTriangleIcon size={13} color="#fbbf24" />
+                      <span>
+                        <strong>Safety Lock Engaged:</strong> This lead has no verified public email address. Transmission is permanently blocked to prevent unsolicited delivery or hallucinated addresses. You can copy the message above for manual research via the company&apos;s website contact form.
+                      </span>
+                    </div>
+                  )}
+
+                  {/* Editable Subject Field */}
+                  <div className="form-group">
+                    <label className="form-label" style={{ fontSize: '0.72rem', display: 'flex', alignItems: 'center', gap: '0.35rem' }}>
+                      <EditIcon size={11} color="var(--accent-cyan)" />
+                      Subject Line (Editable):
+                    </label>
+                    <input
+                      type="text"
+                      className="form-input"
+                      value={draft.subject}
+                      onChange={(e) => handleUpdateDraft(draft.id, 'subject', e.target.value)}
+                      disabled={isSent}
+                      style={{ fontFamily: 'var(--font-sans)', fontSize: '0.8rem', fontWeight: 600 }}
+                    />
+                  </div>
+
+                  {/* Editable Body Field */}
+                  <div className="form-group">
+                    <label className="form-label" style={{ fontSize: '0.72rem', display: 'flex', alignItems: 'center', gap: '0.35rem' }}>
+                      <EditIcon size={11} color="var(--accent-cyan)" />
+                      Email Body (Editable & Grounded in Software Development Services):
+                    </label>
+                    <textarea
+                      className="form-input"
+                      rows={7}
+                      value={draft.body}
+                      onChange={(e) => handleUpdateDraft(draft.id, 'body', e.target.value)}
+                      disabled={isSent}
+                      style={{
+                        fontFamily: 'var(--font-mono)',
+                        fontSize: '0.75rem',
+                        lineHeight: 1.5,
+                        resize: 'vertical',
+                        whiteSpace: 'pre-wrap',
+                      }}
+                    />
+                  </div>
+
+                  {/* Operator Safety Controls & Action Buttons */}
+                  <div
                     style={{
                       display: 'flex',
                       alignItems: 'center',
-                      gap: '0.5rem',
-                      cursor: hasVerifiedEmail && !isSent ? 'pointer' : 'not-allowed',
-                      opacity: hasVerifiedEmail ? 1 : 0.45,
-                      fontSize: '0.78rem',
-                      userSelect: 'none',
+                      justifyContent: 'space-between',
+                      flexWrap: 'wrap',
+                      gap: '0.75rem',
+                      paddingTop: '0.65rem',
+                      borderTop: '1px solid var(--border-subtle)',
                     }}
                   >
-                    <input
-                      type="checkbox"
-                      checked={isApproved}
-                      disabled={!hasVerifiedEmail || isSent}
-                      onChange={() => handleToggleApproval(draft.id)}
-                      style={{ cursor: hasVerifiedEmail && !isSent ? 'pointer' : 'not-allowed' }}
-                    />
-                    <span style={{ fontWeight: 600, color: isApproved ? '#34d399' : 'var(--text-secondary)' }}>
-                      {isApproved ? 'Approved for Dispatch' : 'Approve Draft for Dispatch'}
-                    </span>
-                  </label>
+                    {/* Left Actions: Save and Discard */}
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                      <button
+                        type="button"
+                        className="btn btn-secondary"
+                        onClick={() => handleSaveDraft(draft)}
+                        disabled={isSaving || isSent}
+                        style={{
+                          fontSize: '0.74rem',
+                          padding: '0.35rem 0.75rem',
+                          borderColor: isDirty ? 'var(--accent-cyan)' : undefined,
+                          color: isDirty ? 'var(--accent-cyan)' : undefined,
+                        }}
+                        title="Save edits back to database"
+                      >
+                        {isSaving ? (
+                          <>
+                            <RefreshCwIcon size={12} className="spin" /> Saving...
+                          </>
+                        ) : isJustSaved ? (
+                          <>
+                            <CheckIcon size={12} color="#34d399" /> Saved!
+                          </>
+                        ) : (
+                          <>
+                            <CheckIcon size={12} /> Save Changes
+                          </>
+                        )}
+                      </button>
 
-                  {/* Send Email Action Button */}
-                  <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-                    <button
-                      type="button"
-                      className={`btn ${isApproved && hasVerifiedEmail && !isSent ? 'btn-primary' : 'btn-secondary disabled'}`}
-                      disabled={!isApproved || !hasVerifiedEmail || isSent}
-                      onClick={() => handleInitiateSend(draft)}
-                      style={{ fontSize: '0.75rem', padding: '0.4rem 0.85rem' }}
-                    >
-                      {isSent ? (
-                        <>
-                          <CheckCircleIcon size={13} color="var(--accent-cyan)" />
-                          Sent to {draft.recipient_email}
-                        </>
-                      ) : (
-                        <>
-                          <SendIcon size={13} color="white" />
-                          Send Outbound Email
-                        </>
+                      {!isSent && !isDiscarded && (
+                        <button
+                          type="button"
+                          className="btn btn-secondary"
+                          onClick={() => handleDiscardDraft(draft)}
+                          disabled={discardingDraftId === draft.id}
+                          style={{
+                            fontSize: '0.74rem',
+                            padding: '0.35rem 0.65rem',
+                            color: '#f87171',
+                            borderColor: 'rgba(248,113,113,0.3)',
+                          }}
+                          title="Discard this draft"
+                        >
+                          <XIcon size={12} color="#f87171" /> Discard
+                        </button>
                       )}
-                    </button>
+                    </div>
+
+                    {/* Right Actions: Approval & Transmission */}
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '0.55rem' }}>
+                      {!isSent && (
+                        <button
+                          type="button"
+                          className="btn btn-secondary"
+                          onClick={() => handleToggleApproval(draft.id)}
+                          disabled={!hasVerifiedEmail}
+                          style={{
+                            fontSize: '0.74rem',
+                            padding: '0.35rem 0.75rem',
+                            borderColor: isApproved ? 'rgba(52, 211, 153, 0.4)' : undefined,
+                            color: isApproved ? '#34d399' : undefined,
+                          }}
+                          title={!hasVerifiedEmail ? 'Cannot approve without a verified email' : 'Toggle operator approval'}
+                        >
+                          {isApproved ? (
+                            <>
+                              <CheckCircleIcon size={12} color="#34d399" /> Approved
+                            </>
+                          ) : (
+                            <>
+                              <CheckIcon size={12} /> Approve Draft
+                            </>
+                          )}
+                        </button>
+                      )}
+
+                      <button
+                        type="button"
+                        className={`btn ${isApproved && hasVerifiedEmail && !isSent ? 'btn-primary' : 'btn-secondary disabled'}`}
+                        disabled={!isApproved || !hasVerifiedEmail || isSent}
+                        onClick={() => handleInitiateSend(draft)}
+                        style={{ fontSize: '0.75rem', padding: '0.4rem 0.85rem', fontWeight: 600 }}
+                      >
+                        {isSent ? (
+                          <>
+                            <CheckCircleIcon size={13} color="var(--accent-cyan)" />
+                            Sent to {draft.recipient_email}
+                          </>
+                        ) : (
+                          <>
+                            <SendIcon size={13} color="white" />
+                            Send Outbound Email
+                          </>
+                        )}
+                      </button>
+                    </div>
                   </div>
                 </div>
-              </div>
-            );
-          })}
+              );
+            })
+          )}
         </div>
       )}
 

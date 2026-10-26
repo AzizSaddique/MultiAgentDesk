@@ -87,13 +87,40 @@ class TemplateLLMProvider(BaseLLMProvider):
         recipient_name = _sanitize_recipient_name(lead.contact_name, company)
         recipient_role = lead.contact_role.strip() if lead.contact_role and lead.contact_role != "(Not published on page)" else ""
 
+        # Extract discovery metadata if available on discovered leads
+        discovery_source = getattr(lead, "search_provider", None) or getattr(lead, "source_url", "") or "Web Discovery"
+        discovery_query = getattr(lead, "query", None) or getattr(lead, "source_query", "") or ""
+
+        # Evidence validation: detect insufficient evidence
+        desc_clean = (lead.description or "").strip()
+        has_substantive_desc = len(desc_clean) > 20 and not desc_clean.lower().startswith("no description")
+        has_industry = bool(lead.industry and lead.industry.strip() and lead.industry.lower() not in ("unknown", "general", "n/a"))
+
+        flagged_for_manual_review = False
+        manual_review_reason = None
+
+        if not has_substantive_desc and not has_industry:
+            flagged_for_manual_review = True
+            manual_review_reason = (
+                "Insufficient publicly verified company evidence: limited public description and industry data found. "
+                "Manual research required before approval."
+            )
+            relevance_explanation = "Flagged for manual review: unable to ground software development relevance in verified public data."
+        else:
+            clean_focus = desc_clean[:90] if has_substantive_desc else (lead.industry or "technology")
+            relevance_explanation = (
+                f"Software development services matched to publicly evidenced focus: '{clean_focus}'."
+            )
+
         verified_facts: List[str] = [f"Company Name: {company}"]
         if lead.industry:
             verified_facts.append(f"Industry: {lead.industry}")
-        if lead.description:
-            verified_facts.append(f"Public Focus: {lead.description[:120]}")
+        if has_substantive_desc:
+            verified_facts.append(f"Public Focus: {desc_clean[:140]}")
         if has_email:
             verified_facts.append(f"Verified Email: {lead.email}")
+        if getattr(lead, "website", None):
+            verified_facts.append(f"Website: {lead.website}")
 
         # Salutation
         if recipient_name == f"{company} Team":
@@ -104,48 +131,59 @@ class TemplateLLMProvider(BaseLLMProvider):
         clean_offering = service_offering.strip()
         clean_industry = (lead.industry or "technology").strip()
 
-        # Subject Line synthesis tailored to tone
+        # Subject Line synthesis tailored to tone and company
         if tone == "concise":
-            subject = f"Inquiry regarding {company} & {clean_offering}"
+            subject = f"Software development for {company}"
         elif tone == "consultative":
-            subject = f"Strategic inquiry: Supporting {company}'s {clean_industry} initiatives"
+            subject = f"Supporting {company}'s technical roadmap & {clean_industry} initiatives"
         else:
-            subject = f"Exploring {clean_offering} for {company}"
+            subject = f"Software development partnership with {company}"
 
         # Body Synthesis strictly grounded in public data
-        if lead.description and len(lead.description.strip()) > 15:
-            opening_ref = f"I came across {company}'s public presence focused on {lead.description.strip().rstrip('.')}."
-        elif lead.industry:
-            opening_ref = f"I came across {company} while reviewing leading organizations in {clean_industry}."
+        if has_substantive_desc:
+            opening_ref = f"I came across {company}'s public work in {desc_clean.rstrip('.')}."
+        elif has_industry:
+            opening_ref = f"I came across {company} while researching innovative teams in the {clean_industry} sector."
         else:
-            opening_ref = f"I came across {company}'s public web profile."
+            opening_ref = f"I came across {company}'s public presence online."
 
-        if tone == "concise":
+        if flagged_for_manual_review:
             body_p2 = (
-                f"At {sender_company}, we provide {clean_offering} specifically designed to assist "
-                f"teams in the {clean_industry} space."
+                f"At {sender_company}, we provide custom software development services ({clean_offering}). "
+                f"We collaborate with engineering teams to build high-performance applications and infrastructure."
             )
             body_p3 = (
-                f"Would you be open to a 10-minute introductory conversation next week to see if "
-                f"this could add value to {company}?"
+                f"Would you be open to a brief introductory conversation to learn more about your team's "
+                f"upcoming technical priorities?"
+            )
+        elif tone == "concise":
+            body_p2 = (
+                f"At {sender_company}, our software development team specializes in {clean_offering}, "
+                f"helping {clean_industry} companies accelerate feature releases and streamline system integration."
+            )
+            body_p3 = (
+                f"Would you be open to a 10-minute introductory conversation next week to see how "
+                f"our development support might assist {company}?"
             )
         elif tone == "consultative":
             body_p2 = (
-                f"At {sender_company}, we partner with organizations in {clean_industry} to implement {clean_offering}. "
-                f"Our focus is helping teams eliminate operational bottlenecks and drive measurable outcomes."
+                f"At {sender_company}, we engineer tailored software solutions ({clean_offering}) for teams "
+                f"operating in {clean_industry}. We focus on solving architecture bottlenecks, modernizing web/cloud "
+                f"platforms, and providing dedicated development capacity."
             )
             body_p3 = (
-                f"Given your focus, I would welcome the opportunity to share brief insights on how similar "
-                f"teams approach this. Would you or a colleague have time for a brief introductory call next Tuesday or Thursday?"
+                f"Given your focus, I would welcome the chance to share brief benchmarks on how peer "
+                f"teams scale their development pipelines. Would you or an engineering colleague have 10 minutes next Tuesday or Thursday?"
             )
         else:
             body_p2 = (
-                f"At {sender_company}, we specialize in {clean_offering}. We work closely with companies "
-                f"in the {clean_industry} sector to streamline core workflows and accelerate execution."
+                f"At {sender_company}, we specialize in software development services centered on {clean_offering}. "
+                f"We partner with companies in {clean_industry} to deliver reliable web platforms, automated workflows, "
+                f"and robust systems tailored to their operational requirements."
             )
             body_p3 = (
-                f"If this is relevant to your current objectives, would you be available for a brief 10-minute "
-                f"conversation next week to explore potential synergy?"
+                f"If this is relevant to your current technical objectives, would you be open to a brief 10-minute "
+                f"exchange next week to explore potential fit?"
             )
 
         signoff = f"Best regards,\n\n{sender_name}\n{sender_company}"
@@ -155,7 +193,7 @@ class TemplateLLMProvider(BaseLLMProvider):
         grounding_notes = (
             f"Grounded exclusively in verified public metadata: company name ('{company}'), "
             f"industry ('{clean_industry}'), and verified source page ({source_info}). "
-            f"Zero personal contact names or unverified claims were fabricated."
+            f"Zero personal contact names or unverified business claims were fabricated."
         )
 
         now_iso = datetime.now(timezone.utc).isoformat()
@@ -173,9 +211,15 @@ class TemplateLLMProvider(BaseLLMProvider):
             body=email_body,
             status="drafted",
             created_at=now_iso,
+            updated_at=now_iso,
             source_url=lead.source_url or lead.website or "",
             grounding_notes=grounding_notes,
             verified_facts_used=verified_facts,
+            discovery_source=str(discovery_source),
+            discovery_query=str(discovery_query),
+            relevance_explanation=relevance_explanation,
+            flagged_for_manual_review=flagged_for_manual_review,
+            manual_review_reason=manual_review_reason,
         )
 
 class OllamaLLMProvider(BaseLLMProvider):
@@ -207,20 +251,43 @@ class OllamaLLMProvider(BaseLLMProvider):
         has_email = _has_genuine_email(lead.email)
         recipient_name = _sanitize_recipient_name(lead.contact_name, company)
 
+        discovery_source = getattr(lead, "search_provider", None) or getattr(lead, "source_url", "") or "Web Discovery"
+        discovery_query = getattr(lead, "query", None) or getattr(lead, "source_query", "") or ""
+
+        desc_clean = (lead.description or "").strip()
+        has_substantive_desc = len(desc_clean) > 20 and not desc_clean.lower().startswith("no description")
+        has_industry = bool(lead.industry and lead.industry.strip() and lead.industry.lower() not in ("unknown", "general", "n/a"))
+
+        flagged_for_manual_review = False
+        manual_review_reason = None
+        if not has_substantive_desc and not has_industry:
+            flagged_for_manual_review = True
+            manual_review_reason = (
+                "Insufficient publicly verified company evidence: limited public description and industry data found. "
+                "Manual research required before approval."
+            )
+            relevance_explanation = "Flagged for manual review: unable to ground software development relevance in verified public data."
+        else:
+            clean_focus = desc_clean[:90] if has_substantive_desc else (lead.industry or "technology")
+            relevance_explanation = f"Software development services matched to publicly evidenced focus: '{clean_focus}'."
+
         verified_facts: List[str] = [f"Company: {company}"]
         if lead.industry:
             verified_facts.append(f"Industry: {lead.industry}")
-        if lead.description:
-            verified_facts.append(f"Description: {lead.description}")
+        if desc_clean:
+            verified_facts.append(f"Description: {desc_clean}")
+        if getattr(lead, "website", None):
+            verified_facts.append(f"Website: {lead.website}")
 
         system_prompt = (
             "You are an AI B2B outreach drafting agent for AgentDesk.\n"
             "STRICT GROUNDING CONSTRAINTS:\n"
             "1. ONLY utilize the verified facts provided about the target company.\n"
-            "2. NEVER invent, hallucinate, or assume any person's name, role, email address, previous meetings, or business relationships.\n"
-            "3. If the recipient contact name is a team, address the salutation as 'Hi [Company Name] Team,'.\n"
-            "4. Keep the email concise, professional, grounded, and within 3 paragraphs.\n"
-            "5. You MUST return ONLY valid JSON with keys: 'subject' (string) and 'body' (string)."
+            "2. Explain how software development services may be relevant to the company's publicly evidenced needs.\n"
+            "3. NEVER invent, hallucinate, or assume any person's name, role, email address, previous meetings, or business relationships.\n"
+            "4. If the recipient contact name is a team, address the salutation as 'Hi [Company Name] Team,'.\n"
+            "5. Keep the email concise, professional, grounded, and within 3 paragraphs.\n"
+            "6. You MUST return ONLY valid JSON with keys: 'subject' (string) and 'body' (string)."
         )
 
         user_prompt = (
@@ -230,7 +297,7 @@ class OllamaLLMProvider(BaseLLMProvider):
             f"Recipient: {recipient_name}\n"
             f"Sender Name: {sender_name}\n"
             f"Sender Organization: {sender_company}\n"
-            f"Service Offering: {service_offering}\n"
+            f"Software Development Offering: {service_offering}\n"
             f"Tone: {tone}\n"
             "Generate personalized B2B outreach strictly complying with the grounding rules. Return valid JSON only."
         )
@@ -253,7 +320,7 @@ class OllamaLLMProvider(BaseLLMProvider):
                 raw_response = data.get("response", "{}")
                 parsed = json.loads(raw_response)
 
-                subject = parsed.get("subject", f"Exploring {service_offering} for {company}")
+                subject = parsed.get("subject", f"Software development for {company}")
                 body = parsed.get("body", "")
                 if not body:
                     raise ValueError("Ollama generated empty email body.")
@@ -279,9 +346,15 @@ class OllamaLLMProvider(BaseLLMProvider):
             body=body,
             status="drafted",
             created_at=now_iso,
+            updated_at=now_iso,
             source_url=lead.source_url or lead.website or "",
             grounding_notes=f"Drafted via local Ollama ({self.model_name}). Grounded in verified company metadata.",
             verified_facts_used=verified_facts,
+            discovery_source=str(discovery_source),
+            discovery_query=str(discovery_query),
+            relevance_explanation=relevance_explanation,
+            flagged_for_manual_review=flagged_for_manual_review,
+            manual_review_reason=manual_review_reason,
         )
 
 class CloudOpenAICompatibleProvider(BaseLLMProvider):
@@ -320,20 +393,43 @@ class CloudOpenAICompatibleProvider(BaseLLMProvider):
         has_email = _has_genuine_email(lead.email)
         recipient_name = _sanitize_recipient_name(lead.contact_name, company)
 
+        discovery_source = getattr(lead, "search_provider", None) or getattr(lead, "source_url", "") or "Web Discovery"
+        discovery_query = getattr(lead, "query", None) or getattr(lead, "source_query", "") or ""
+
+        desc_clean = (lead.description or "").strip()
+        has_substantive_desc = len(desc_clean) > 20 and not desc_clean.lower().startswith("no description")
+        has_industry = bool(lead.industry and lead.industry.strip() and lead.industry.lower() not in ("unknown", "general", "n/a"))
+
+        flagged_for_manual_review = False
+        manual_review_reason = None
+        if not has_substantive_desc and not has_industry:
+            flagged_for_manual_review = True
+            manual_review_reason = (
+                "Insufficient publicly verified company evidence: limited public description and industry data found. "
+                "Manual research required before approval."
+            )
+            relevance_explanation = "Flagged for manual review: unable to ground software development relevance in verified public data."
+        else:
+            clean_focus = desc_clean[:90] if has_substantive_desc else (lead.industry or "technology")
+            relevance_explanation = f"Software development services matched to publicly evidenced focus: '{clean_focus}'."
+
         verified_facts: List[str] = [f"Company: {company}"]
         if lead.industry:
             verified_facts.append(f"Industry: {lead.industry}")
-        if lead.description:
-            verified_facts.append(f"Description: {lead.description}")
+        if desc_clean:
+            verified_facts.append(f"Description: {desc_clean}")
+        if getattr(lead, "website", None):
+            verified_facts.append(f"Website: {lead.website}")
 
         system_prompt = (
             "You are an AI B2B outreach drafting agent for AgentDesk.\n"
             "STRICT GROUNDING CONSTRAINTS:\n"
             "1. ONLY utilize the verified facts provided about the target company.\n"
-            "2. NEVER invent, hallucinate, or assume any person's name, role, email address, previous meetings, or business relationships.\n"
-            "3. If the recipient contact name is a team, address the salutation as 'Hi [Company Name] Team,'.\n"
-            "4. Keep the email concise, professional, grounded, and within 3 paragraphs.\n"
-            "5. You MUST return valid JSON with keys: 'subject' (string) and 'body' (string)."
+            "2. Explain how software development services may be relevant to the company's publicly evidenced needs.\n"
+            "3. NEVER invent, hallucinate, or assume any person's name, role, email address, previous meetings, or business relationships.\n"
+            "4. If the recipient contact name is a team, address the salutation as 'Hi [Company Name] Team,'.\n"
+            "5. Keep the email concise, professional, grounded, and within 3 paragraphs.\n"
+            "6. You MUST return valid JSON with keys: 'subject' (string) and 'body' (string)."
         )
 
         user_prompt = (
@@ -343,7 +439,7 @@ class CloudOpenAICompatibleProvider(BaseLLMProvider):
             f"Recipient: {recipient_name}\n"
             f"Sender Name: {sender_name}\n"
             f"Sender Organization: {sender_company}\n"
-            f"Service Offering: {service_offering}\n"
+            f"Software Development Offering: {service_offering}\n"
             f"Tone: {tone}\n"
             "Generate personalized B2B outreach strictly complying with the grounding rules. Output JSON only."
         )
@@ -372,7 +468,7 @@ class CloudOpenAICompatibleProvider(BaseLLMProvider):
                 content = data["choices"][0]["message"]["content"]
                 parsed = json.loads(content)
 
-                subject = parsed.get("subject", f"Exploring {service_offering} for {company}")
+                subject = parsed.get("subject", f"Software development for {company}")
                 body = parsed.get("body", "")
                 if not body:
                     raise ValueError("Cloud AI generated empty email body.")
@@ -395,9 +491,15 @@ class CloudOpenAICompatibleProvider(BaseLLMProvider):
             body=body,
             status="drafted",
             created_at=now_iso,
+            updated_at=now_iso,
             source_url=lead.source_url or lead.website or "",
             grounding_notes=f"Drafted via Cloud AI ({self.model_name}). Grounded strictly in verified public metadata.",
             verified_facts_used=verified_facts,
+            discovery_source=str(discovery_source),
+            discovery_query=str(discovery_query),
+            relevance_explanation=relevance_explanation,
+            flagged_for_manual_review=flagged_for_manual_review,
+            manual_review_reason=manual_review_reason,
         )
 
 def get_llm_provider(config: Optional[AIProviderConfig] = None) -> BaseLLMProvider:
@@ -405,14 +507,23 @@ def get_llm_provider(config: Optional[AIProviderConfig] = None) -> BaseLLMProvid
     Factory creating the selected LLM provider.
     Defaults to TemplateLLMProvider (deterministic, zero-leakage, 100% offline-ready).
     """
-    if not config or not config.provider_type or config.provider_type == "template":
+    if not config or not config.provider_type or config.provider_type in ("template", "built-in"):
         return TemplateLLMProvider()
     elif config.provider_type == "ollama":
         return OllamaLLMProvider(api_base=config.api_base, model_name=config.model_name)
-    elif config.provider_type == "openai":
-        return CloudOpenAICompatibleProvider(
+    elif config.provider_type in ("openai", "cloud"):
+        provider = CloudOpenAICompatibleProvider(
             api_base=config.api_base,
             model_name=config.model_name,
             api_key=config.api_key
         )
-    return TemplateLLMProvider()
+        if not provider._api_key:
+            raise ValueError(
+                "Cloud AI provider requires an API key. Please specify an API key or configure "
+                "the AGENTDESK_LLM_API_KEY environment variable, or use the Built-in Grounded Drafter."
+            )
+        return provider
+    else:
+        raise ValueError(
+            f"Unsupported AI provider type '{config.provider_type}'. Supported providers: 'template', 'ollama', 'openai'."
+        )

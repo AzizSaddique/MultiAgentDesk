@@ -100,9 +100,15 @@ export interface OutreachDraft {
   body: string;
   status: 'drafted' | 'approved' | 'rejected' | 'sent';
   created_at: string;
+  updated_at?: string | null;
   source_url: string;
   grounding_notes: string;
   verified_facts_used: string[];
+  discovery_source?: string;
+  discovery_query?: string;
+  relevance_explanation?: string;
+  flagged_for_manual_review?: boolean;
+  manual_review_reason?: string | null;
 }
 
 export interface OutreachDraftRequest {
@@ -294,4 +300,36 @@ export interface SearchProvidersResponse {
 export interface TransferToOutreachRequest {
   job_id: string;
   lead_ids: string[];
+  service_offering?: string;
+  tone?: 'professional' | 'consultative' | 'concise';
+  sender_name?: string;
+  sender_company?: string;
+  ai_config?: AIProviderConfig;
+  prevent_duplicates?: boolean;
+}
+
+export interface LeadTransferResponse extends OutreachDraftResponse {
+  created_count: number;
+  skipped_count: number;
+  failed_count: number;
+  messages: string[];
+}
+
+export interface UpdateDraftRequest {
+  subject?: string;
+  body?: string;
+  recipient_name?: string;
+}
+
+export interface DiscardDraftRequest {
+  reason?: string;
+}
+
+export interface OutreachDraftsListResponse {
+  drafts: OutreachDraft[];
+  total: number;
+  page: number;
+  page_size: number;
+  total_pages: number;
+  counts_by_status: Record<string, number>;
 }

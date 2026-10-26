@@ -7,6 +7,7 @@ dispatched records and comprehensive outreach history to SQLite in storage/
 to survive service restarts.
 """
 import os
+import json
 import uuid
 import sqlite3
 import hashlib
@@ -23,6 +24,24 @@ except (ImportError, ValueError):
     except ImportError:
         def sanitize_log_message(text: str, custom_secrets=None) -> str:
             return text or ""
+
+def _get_outreach_draft_cls():
+    """Robust resolver for OutreachDraft model across multiple package environments."""
+    try:
+        from backend.models import OutreachDraft
+        return OutreachDraft
+    except ImportError:
+        pass
+    try:
+        from .models import OutreachDraft
+        return OutreachDraft
+    except (ImportError, ValueError):
+        pass
+    try:
+        from models import OutreachDraft
+        return OutreachDraft
+    except ImportError:
+        return None
 
 @dataclass
 class DispatchedRecord:
@@ -160,7 +179,46 @@ class DispatchTracker:
                 conn.execute("CREATE INDEX IF NOT EXISTS idx_disc_leads_job ON discovered_leads(job_id)")
                 conn.execute("CREATE INDEX IF NOT EXISTS idx_disc_leads_email_stat ON discovered_leads(email_verification_status)")
 
-                # 5. Backfill any legacy dispatched_records into outreach_history
+                # 5. Outreach Drafts table
+                conn.execute("""
+                    CREATE TABLE IF NOT EXISTS outreach_drafts (
+                        id TEXT PRIMARY KEY,
+                        lead_id TEXT NOT NULL,
+                        company_name TEXT NOT NULL,
+                        recipient_name TEXT,
+                        recipient_role TEXT,
+                        recipient_email TEXT NOT NULL,
+                        has_verified_email INTEGER NOT NULL DEFAULT 0,
+                        subject TEXT NOT NULL,
+                        body TEXT NOT NULL,
+                        status TEXT NOT NULL DEFAULT 'drafted',
+                        created_at TEXT NOT NULL,
+                        updated_at TEXT,
+                        source_url TEXT,
+                        grounding_notes TEXT,
+                        verified_facts_used TEXT,
+                        discovery_source TEXT,
+                        discovery_query TEXT,
+                        relevance_explanation TEXT,
+                        flagged_for_manual_review INTEGER NOT NULL DEFAULT 0,
+                        manual_review_reason TEXT,
+                        raw_json TEXT NOT NULL
+                    )
+                """)
+                conn.execute("CREATE INDEX IF NOT EXISTS idx_drafts_lead_id ON outreach_drafts(lead_id)")
+                conn.execute("CREATE INDEX IF NOT EXISTS idx_drafts_status ON outreach_drafts(status)")
+                conn.execute("CREATE INDEX IF NOT EXISTS idx_drafts_created ON outreach_drafts(created_at DESC)")
+
+                # 6. Legacy draft_records table compatibility
+                conn.execute("""
+                    CREATE TABLE IF NOT EXISTS draft_records (
+                        id TEXT PRIMARY KEY,
+                        raw_json TEXT NOT NULL
+                    )
+                """)
+
+                # 7. Backfill any legacy dispatched_records into outreach_history
+
                 conn.execute("""
                     INSERT OR IGNORE INTO outreach_history
                     (id, draft_id, recipient_email, recipient_name, company_name, subject, body_preview, source_url, status, provider, is_simulated, dispatched_at, error_message)
@@ -966,6 +1024,270 @@ class DispatchTracker:
         with self._lock:
             return draft_id in self._in_flight_drafts
 
+    def save_draft(self, draft: Any) -> None:
+        """Persists an OutreachDraft object to SQLite and keeps draft_records in sync."""
+        if not self._db_path:
+            return
+        try:
+            raw_json = draft.model_dump_json() if hasattr(draft, "model_dump_json") else json.dumps(draft)
+            verified_facts_json = json.dumps(getattr(draft, "verified_facts_used", []))
+            has_verified = 1 if getattr(draft, "has_verified_email", False) else 0
+            flagged = 1 if getattr(draft, "flagged_for_manual_review", False) else 0
+
+            with sqlite3.connect(self._db_path, timeout=5.0) as conn:
+                conn.execute("""
+                    INSERT OR REPLACE INTO outreach_drafts (
+                        id, lead_id, company_name, recipient_name, recipient_role, recipient_email,
+                        has_verified_email, subject, body, status, created_at, updated_at,
+                        source_url, grounding_notes, verified_facts_used, discovery_source,
+                        discovery_query, relevance_explanation, flagged_for_manual_review,
+                        manual_review_reason, raw_json
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, (
+                    draft.id,
+                    draft.lead_id,
+                    draft.company_name,
+                    getattr(draft, "recipient_name", ""),
+                    getattr(draft, "recipient_role", ""),
+                    draft.recipient_email,
+                    has_verified,
+                    draft.subject,
+                    draft.body,
+                    getattr(draft, "status", "drafted"),
+                    draft.created_at,
+                    getattr(draft, "updated_at", None),
+                    getattr(draft, "source_url", ""),
+                    getattr(draft, "grounding_notes", ""),
+                    verified_facts_json,
+                    getattr(draft, "discovery_source", ""),
+                    getattr(draft, "discovery_query", ""),
+                    getattr(draft, "relevance_explanation", ""),
+                    flagged,
+                    getattr(draft, "manual_review_reason", None),
+                    raw_json,
+                ))
+                conn.execute("INSERT OR REPLACE INTO draft_records (id, raw_json) VALUES (?, ?)", (draft.id, raw_json))
+                conn.commit()
+        except Exception:
+            pass
+
+    def get_draft(self, draft_id: str) -> Optional[Any]:
+        """Retrieves an OutreachDraft by ID."""
+        if not self._db_path or not draft_id:
+            return None
+        try:
+            with sqlite3.connect(self._db_path, timeout=5.0) as conn:
+                cur = conn.execute("SELECT raw_json FROM outreach_drafts WHERE id = ?", (draft_id,))
+                row = cur.fetchone()
+                if not row:
+                    cur = conn.execute("SELECT raw_json FROM draft_records WHERE id = ?", (draft_id,))
+                    row = cur.fetchone()
+                if row:
+                    data = json.loads(row[0])
+                    draft_cls = _get_outreach_draft_cls()
+                    if draft_cls:
+                        return draft_cls.model_validate(data)
+                    return data
+        except Exception:
+            pass
+        return None
+
+    def get_draft_by_lead_id(self, lead_id: str) -> Optional[Any]:
+        """Retrieves existing active draft for a lead to prevent duplicates."""
+        if not self._db_path or not lead_id:
+            return None
+        try:
+            clean_id = lead_id.strip()
+            variants = [clean_id]
+            if clean_id.startswith("disc-"):
+                variants.append(clean_id[5:])
+            else:
+                variants.append(f"disc-{clean_id}")
+
+            with sqlite3.connect(self._db_path, timeout=5.0) as conn:
+                placeholders = ",".join("?" for _ in variants)
+                query = f"""
+                    SELECT raw_json FROM outreach_drafts
+                    WHERE lead_id IN ({placeholders}) AND status != 'rejected'
+                    ORDER BY created_at DESC LIMIT 1
+                """
+                cur = conn.execute(query, tuple(variants))
+                row = cur.fetchone()
+                if row:
+                    data = json.loads(row[0])
+                    draft_cls = _get_outreach_draft_cls()
+                    if draft_cls:
+                        return draft_cls.model_validate(data)
+                    return data
+        except Exception:
+            pass
+        return None
+
+    def query_drafts(
+        self,
+        status: Optional[str] = None,
+        search: Optional[str] = None,
+        page: int = 1,
+        page_size: int = 50,
+    ) -> Tuple[List[Any], int, int, Dict[str, int]]:
+        """Queries drafts with pagination, text search, and status counts."""
+        default_counts = {"all": 0, "drafted": 0, "approved": 0, "rejected": 0, "sent": 0, "flagged": 0}
+        if not self._db_path:
+            return [], 0, 0, default_counts
+
+        try:
+            with sqlite3.connect(self._db_path, timeout=5.0) as conn:
+                counts = dict(default_counts)
+                cur = conn.execute("SELECT status, COUNT(*) FROM outreach_drafts GROUP BY status")
+                for row in cur.fetchall():
+                    s = (row[0] or "").lower()
+                    if s in counts:
+                        counts[s] = row[1]
+                cur_all = conn.execute("SELECT COUNT(*) FROM outreach_drafts")
+                counts["all"] = cur_all.fetchone()[0]
+                cur_flag = conn.execute("SELECT COUNT(*) FROM outreach_drafts WHERE flagged_for_manual_review = 1")
+                counts["flagged"] = cur_flag.fetchone()[0]
+
+                clauses = []
+                params: List[Any] = []
+
+                if status and status.lower() != "all":
+                    if status.lower() == "flagged":
+                        clauses.append("flagged_for_manual_review = 1")
+                    else:
+                        clauses.append("status = ?")
+                        params.append(status.lower())
+
+                if search and search.strip():
+                    term = f"%{search.strip().lower()}%"
+                    clauses.append("(LOWER(company_name) LIKE ? OR LOWER(recipient_email) LIKE ? OR LOWER(subject) LIKE ? OR LOWER(recipient_name) LIKE ?)")
+                    params.extend([term, term, term, term])
+
+                where_sql = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+
+                count_sql = f"SELECT COUNT(*) FROM outreach_drafts {where_sql}"
+                total = conn.execute(count_sql, tuple(params)).fetchone()[0]
+
+                total_pages = max(1, (total + page_size - 1) // page_size) if total > 0 else 1
+                offset = (max(1, page) - 1) * page_size
+
+                data_sql = f"""
+                    SELECT raw_json FROM outreach_drafts
+                    {where_sql}
+                    ORDER BY created_at DESC
+                    LIMIT ? OFFSET ?
+                """
+                cur_params = list(params)
+                cur_params.extend([page_size, offset])
+                cur = conn.execute(data_sql, tuple(cur_params))
+
+                draft_cls = _get_outreach_draft_cls()
+
+                drafts = []
+                for row in cur.fetchall():
+                    try:
+                        data = json.loads(row[0])
+                        if draft_cls:
+                            d = draft_cls.model_validate(data)
+                        else:
+                            d = data
+                        drafts.append(d)
+                    except Exception:
+                        pass
+
+                return drafts, total, total_pages, counts
+        except Exception:
+            return [], 0, 0, default_counts
+
+    def update_draft(self, draft_id: str, updates: Dict[str, Any]) -> Optional[Any]:
+        """Updates fields of an existing draft and persists."""
+        draft = self.get_draft(draft_id)
+        if not draft:
+            return None
+
+        if "subject" in updates and updates["subject"] is not None:
+            draft.subject = updates["subject"].strip()
+        if "body" in updates and updates["body"] is not None:
+            draft.body = updates["body"].strip()
+        if "recipient_name" in updates and updates["recipient_name"] is not None:
+            draft.recipient_name = updates["recipient_name"].strip()
+        if "status" in updates and updates["status"] is not None:
+            draft.status = updates["status"]
+
+        draft.updated_at = datetime.now(timezone.utc).isoformat()
+        self.save_draft(draft)
+        return draft
+
+    def approve_draft(self, draft_id: str) -> Optional[Any]:
+        """Explicitly approves a draft. Safety check: requires verified public email."""
+        draft = self.get_draft(draft_id)
+        if not draft:
+            return None
+        if not draft.has_verified_email:
+            raise ValueError("Safety Gate: Cannot approve outreach draft without a verified public business email address.")
+        if draft.status == "sent":
+            raise ValueError("Draft has already been sent.")
+
+        draft.status = "approved"
+        draft.updated_at = datetime.now(timezone.utc).isoformat()
+        self.save_draft(draft)
+
+        self.record_history_entry(
+            draft_id=draft.id,
+            recipient_email=draft.recipient_email,
+            subject=draft.subject,
+            status="approved",
+            provider="human-approval",
+            is_simulated=False,
+            recipient_name=draft.recipient_name,
+            company_name=draft.company_name,
+            body_preview=draft.body,
+            source_url=draft.source_url,
+            dispatched_at=draft.updated_at,
+        )
+        return draft
+
+    def discard_draft(self, draft_id: str, reason: Optional[str] = None) -> Optional[Any]:
+        """Discards / rejects an outreach draft."""
+        draft = self.get_draft(draft_id)
+        if not draft:
+            return None
+        if draft.status == "sent":
+            raise ValueError("Cannot discard a draft that has already been dispatched.")
+
+        draft.status = "rejected"
+        draft.updated_at = datetime.now(timezone.utc).isoformat()
+        self.save_draft(draft)
+
+        self.record_history_entry(
+            draft_id=draft.id,
+            recipient_email=draft.recipient_email,
+            subject=draft.subject,
+            status="rejected",
+            provider="human-review",
+            is_simulated=False,
+            recipient_name=draft.recipient_name,
+            company_name=draft.company_name,
+            body_preview=draft.body,
+            source_url=draft.source_url,
+            error_message=reason or "Discarded by operator",
+            dispatched_at=draft.updated_at,
+        )
+        return draft
+
+    def delete_draft(self, draft_id: str) -> bool:
+        """Permanently deletes a draft record."""
+        if not self._db_path or not draft_id:
+            return False
+        try:
+            with sqlite3.connect(self._db_path, timeout=5.0) as conn:
+                conn.execute("DELETE FROM outreach_drafts WHERE id = ?", (draft_id,))
+                conn.execute("DELETE FROM draft_records WHERE id = ?", (draft_id,))
+                conn.commit()
+            return True
+        except Exception:
+            return False
+
     def clear(self):
         """Reset registry and clear tables (primarily used for test isolation)."""
         with self._lock:
@@ -980,9 +1302,12 @@ class DispatchTracker:
                         conn.execute("DELETE FROM outreach_history")
                         conn.execute("DELETE FROM discovery_jobs")
                         conn.execute("DELETE FROM discovered_leads")
+                        conn.execute("DELETE FROM outreach_drafts")
+                        conn.execute("DELETE FROM draft_records")
                         conn.commit()
                 except Exception:
                     pass
+
 
 # Global singleton tracker
 global_dispatch_tracker = DispatchTracker()

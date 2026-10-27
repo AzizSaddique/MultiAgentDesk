@@ -223,6 +223,342 @@ def parse_natural_language_request(prompt: str, ai_config: Optional[AIProviderCo
 
 
 # -------------------------------------------------------------------------
+# Industry Classification Taxonomy & Quality Functions
+# -------------------------------------------------------------------------
+
+INDUSTRY_TAXONOMY: Dict[str, List[str]] = {
+    "Solar Energy": [
+        r'\bsolar\b',
+        r'\bphotovoltaic\b',
+        r'\bpv\s+systems?\b',
+        r'\brooftop\s+solar\b',
+        r'\bsolar\s+panels?\b',
+        r'\bnet\s+metering\b',
+        r'\bsolar\s+epc\b',
+        r'\bsolar\s+power\b',
+        r'\bsolar\s+solutions?\b',
+        r'\bsolar\s+installations?\b',
+        r'\bclean\s+solar\b',
+    ],
+    "Energy Storage": [
+        r'\bbattery\s+storage\b',
+        r'\bbess\b',
+        r'\benergy\s+storage\b',
+        r'\bbattery\s+systems?\b',
+        r'\blithium-ion\b',
+        r'\bbattery\s+banks?\b',
+    ],
+    "Renewable Energy": [
+        r'\brenewable\s+energy\b',
+        r'\bgreen\s+transition\b',
+        r'\bclean\s+energy\b',
+        r'\bwind\s+(?:power|turbine|energy)\b',
+        r'\bbiomass\b',
+        r'\bhydro\s+power\b',
+        r'\bgeothermal\b',
+        r'\bdecarboniz(?:ation|e)\b',
+    ],
+    "Power Systems": [
+        r'\bpower\s+systems?\b',
+        r'\bpower\s+generation\b',
+        r'\belectrical\s+grid\b',
+        r'\bsubstation\b',
+        r'\bpower\s+distribution\b',
+        r'\bswitchgear\b',
+        r'\btransformers?\b',
+        r'\bups\s+systems?\b',
+        r'\bpower\s+plants?\b',
+    ],
+    "Logistics": [
+        r'\bfreight\s+forwarding\b',
+        r'\bsupply\s+chain\b',
+        r'\bwarehous(?:ing|e)\b',
+        r'\bcargo\s+transportation\b',
+        r'\btrucking\b',
+        r'\b3pl\b',
+        r'\bthird-party\s+logistics\b',
+        r'\bocean\s+freight\b',
+        r'\bshipping\s+containers?\b',
+        r'\bhauling\b',
+        r'\bfleet\s+management\b',
+        r'\bdistribution\s+centers?\b',
+    ],
+    "Software & Cloud Services": [
+        r'\bsoftware\s+(?:house|development|engineering|company|solutions?)\b',
+        r'\bcloud\s+(?:services?|architecture|integration|native)\b',
+        r'\bsaas\b',
+        r'\benterprise\s+software\b',
+        r'\bweb\s+applications?\b',
+        r'\bmobile\s+apps?\b',
+        r'\bfintech\b',
+        r'\bcustom\s+software\b',
+    ],
+    "IoT & Embedded Systems": [
+        r'\biot\b',
+        r'\binternet\s+of\s+things\b',
+        r'\bembedded\s+(?:systems?|software|firmware)\b',
+        r'\bconnected\s+(?:devices?|vehicle)\b',
+        r'\bhardware\s+telemetry\b',
+        r'\bsmart\s+devices?\b',
+        r'\bsensor\s+networks?\b',
+    ],
+    "Robotics & Industrial Automation": [
+        r'\brobotics\b',
+        r'\bindustrial\s+automation\b',
+        r'\bplc\s+programming\b',
+        r'\bscada\b',
+        r'\bautomation\s+engineering\b',
+        r'\bfactory\s+automation\b',
+    ],
+    "Manufacturing & Industrial": [
+        r'\bmanufacturing\s+plants?\b',
+        r'\bindustrial\s+fabrication\b',
+        r'\bcnc\s+machining\b',
+        r'\bassembly\s+lines?\b',
+        r'\bheavy\s+machinery\b',
+        r'\bindustrial\s+equipment\b',
+    ],
+    "Food & Beverage": [
+        r'\bfood\s+processing\b',
+        r'\bbeverage\s+(?:production|manufacturing)\b',
+        r'\bagro-industrial\b',
+        r'\bfood\s+packaging\b',
+    ],
+    "Healthcare Technology": [
+        r'\bhealthtech\b',
+        r'\bmedical\s+devices?\b',
+        r'\btelemedicine\b',
+        r'\bclinical\s+software\b',
+        r'\bhospital\s+management\b',
+    ],
+}
+
+
+def classify_company_industry(
+    company_name: str,
+    description: str,
+    keywords: Optional[List[str]] = None,
+    source_url: str = "",
+    plan_industry: Optional[str] = None,
+) -> Tuple[str, float, str]:
+    """
+    Classifies company industry from business description and supporting evidence.
+    Never assigns industry based solely on user search keywords or plan industry.
+    Returns (industry_label, confidence, reason).
+    """
+    evidence_tokens = [company_name or "", description or "", " ".join(keywords or []), source_url or ""]
+    evidence_text = " ".join(evidence_tokens).lower()
+
+    scores: Dict[str, int] = {}
+    matched_patterns: Dict[str, List[str]] = {}
+
+    for industry_name, patterns in INDUSTRY_TAXONOMY.items():
+        match_count = 0
+        hits = []
+        for pat in patterns:
+            found = re.findall(pat, evidence_text, flags=re.IGNORECASE)
+            if found:
+                match_count += len(found)
+                hits.append(pat.replace(r'\b', '').replace(r'\s+', ' '))
+        if match_count > 0:
+            scores[industry_name] = match_count
+            matched_patterns[industry_name] = hits
+
+    if scores:
+        best_industry = max(scores, key=lambda k: scores[k])
+        hits_str = ", ".join(matched_patterns[best_industry][:3])
+        confidence = min(0.98, 0.65 + 0.10 * scores[best_industry])
+        return best_industry, confidence, f"Classified as '{best_industry}' based on evidence keywords ({hits_str})"
+
+    clean_desc = (description or "").strip()
+    if plan_industry and plan_industry.lower() not in ("general commercial", "commercial", ""):
+        p_clean = re.sub(r'[^a-zA-Z]+', ' ', plan_industry).strip().lower()
+        p_tokens = [t for t in p_clean.split() if len(t) >= 4 and t not in ("companies", "services", "solutions", "provider")]
+        if p_tokens and any(tok in clean_desc.lower() for tok in p_tokens) and len(clean_desc) >= 35:
+            return plan_industry, 0.70, f"Matched plan industry '{plan_industry}' supported by business description"
+
+    if not clean_desc or clean_desc.lower() in ("commercial services provider", "welcome to our website"):
+        return "Unknown", 0.20, "No business description or industry evidence available"
+    elif len(clean_desc) < 35:
+        return "Needs Review", 0.35, "Insufficient business description to confirm industry sector with confidence"
+    else:
+        return "Needs Review", 0.40, "Evidence does not match known industry sectors; requires review"
+
+
+def is_scientific_notation_corrupted(val: Optional[str]) -> bool:
+    """Detects numbers corrupted by spreadsheet scientific notation (e.g. 9.23E+11)."""
+    if not val:
+        return False
+    s = str(val).strip()
+    return bool(re.match(r'^[+-]?\d+(?:\.\d+)?[eE][+-]?\d+$', s))
+
+
+def evaluate_email_verification(
+    email: Optional[str],
+    provider_verified: bool = False,
+    delivery_confirmed: bool = False,
+) -> Tuple[str, str]:
+    """
+    Truthfully evaluates email verification status.
+    Distinguishes public-source discovery ('publicly_listed') from actual provider verification.
+    Never claims delivery confirmation unless delivery has actually been confirmed.
+    """
+    if not email or not str(email).strip():
+        return "not_found", "No public business email address found on official sources"
+
+    clean_email = str(email).strip()
+    if not _has_genuine_email(clean_email):
+        return "invalid", f"Email address '{clean_email}' failed genuine email syntax validation"
+
+    if provider_verified:
+        return "verified_by_provider", "Inbox operational status verified by email verification provider"
+
+    # Public source discovery - syntax is valid, domain exists, but mailbox delivery is unverified
+    return "publicly_listed", "Publicly listed business email discovered on official website or registry; mailbox unverified"
+
+
+def evaluate_phone_verification(
+    phone: Optional[str],
+    provider_verified: bool = False,
+) -> Tuple[str, str]:
+    """
+    Truthfully evaluates phone verification status.
+    Preserves exact string. Does NOT invent digits for corrupted numbers.
+    Flags spreadsheet scientific notation (9.23E+11) or <7 digits for operator review.
+    """
+    if not phone or not str(phone).strip():
+        return "not_found", "No telephone number discovered"
+
+    clean_phone = str(phone).strip()
+    if is_scientific_notation_corrupted(clean_phone):
+        return "needs_review", f"Phone number '{clean_phone}' appears corrupted by spreadsheet scientific notation; manual review required"
+
+    digits = re.sub(r'\D', '', clean_phone)
+    if len(digits) < 7:
+        return "needs_review", f"Phone number '{clean_phone}' contains fewer than 7 digits"
+
+    if provider_verified:
+        return "verified_by_provider", "Telephone line active status verified by telephony provider"
+
+    return "publicly_listed", "Publicly listed telephone contact; operational status unverified"
+
+
+def calculate_lead_relevance(
+    plan: DiscoveryPlan,
+    company_name: str,
+    business_desc: str,
+    classified_industry: str,
+    industry_confidence: float,
+    city: str,
+    country: str,
+    website: str,
+    email: str,
+    email_status: str,
+    phone: str,
+    phone_status: str,
+    source_query: str = "",
+) -> Tuple[float, str]:
+    """
+    Computes a dynamic relevance score (0.10 - 0.98) and transparent evidence-backed explanation.
+    Evaluates industry match, geographic fit, contact availability, and description substance.
+    Penalizes thin descriptions (<35 chars), missing evidence, or industry discrepancies.
+    """
+    score = 0.20
+    relevance_notes: List[str] = []
+
+    # 1. Industry Alignment
+    target_ind = (plan.industry or "").lower()
+    target_tokens = [t for t in re.split(r'[^a-zA-Z0-9]+', target_ind) if len(t) >= 3 and t not in ("general", "commercial")]
+
+    if classified_industry in ("Unknown", "Needs Review"):
+        score -= 0.05
+        relevance_notes.append(f"Industry unverified ({classified_industry})")
+    elif any(tok in classified_industry.lower() for tok in target_tokens):
+        score += 0.35 * industry_confidence
+        relevance_notes.append(f"Industry '{classified_industry}' directly aligns with target '{plan.industry}'")
+    elif any(tok in (business_desc or "").lower() for tok in target_tokens):
+        score += 0.25 * industry_confidence
+        relevance_notes.append(f"Business description aligns with target '{plan.industry}'")
+    else:
+        score -= 0.15
+        relevance_notes.append(f"Industry '{classified_industry}' diverges from target '{plan.industry}'")
+
+    # 2. Location Alignment
+    target_city = (plan.location_city or "").strip().lower()
+    target_country = (plan.location_country or "").strip().lower()
+    desc_lower = (business_desc or "").lower()
+    url_lower = (website or "").lower()
+    city_lower = (city or "").lower()
+    country_lower = (country or "").lower()
+
+    loc_matched = False
+    if target_city:
+        if target_city in city_lower or target_city in desc_lower or target_city in url_lower:
+            score += 0.20
+            relevance_notes.append(f"City '{plan.location_city}' confirmed in business profile")
+            loc_matched = True
+        else:
+            relevance_notes.append(f"City '{plan.location_city}' not confirmed in profile")
+
+    if target_country:
+        if target_country in country_lower or target_country in desc_lower or target_country in url_lower or (target_country == "pakistan" and ".pk" in url_lower):
+            score += 0.10
+            if not loc_matched:
+                relevance_notes.append(f"Country '{plan.location_country}' confirmed")
+                loc_matched = True
+        elif not loc_matched:
+            relevance_notes.append(f"Target country '{plan.location_country}' unconfirmed")
+
+    # 3. Description Depth & Substance
+    clean_desc = (business_desc or "").strip()
+    if len(clean_desc) >= 100:
+        score += 0.15
+        relevance_notes.append("Detailed operational description available")
+    elif len(clean_desc) >= 35:
+        score += 0.08
+        relevance_notes.append("Standard business description available")
+    else:
+        score -= 0.15
+        relevance_notes.append("Thin business description (<35 chars); flagged for review")
+
+    # 4. Contact Verifiability
+    if email and email_status in ("publicly_listed", "verified_by_provider", "verified_public"):
+        score += 0.12
+        relevance_notes.append("Public business email verified")
+    elif email:
+        score += 0.04
+        relevance_notes.append(f"Email present ({email_status})")
+    else:
+        relevance_notes.append("No public email discovered")
+
+    if phone and phone_status in ("publicly_listed", "verified_by_provider", "verified_public"):
+        score += 0.08
+        relevance_notes.append("Public telephone listed")
+    elif phone_status == "needs_review":
+        score -= 0.05
+        relevance_notes.append("Telephone number flagged for review")
+
+    # 5. Keywords match
+    if plan.keywords:
+        kw_matches = [kw for kw in plan.keywords if kw.lower() in desc_lower or kw.lower() in company_name.lower()]
+        if kw_matches:
+            bonus = min(0.12, 0.04 * len(kw_matches))
+            score += bonus
+            relevance_notes.append(f"Keyword matches: {', '.join(kw_matches[:3])}")
+
+    # Clamping and penalty caps
+    if len(clean_desc) < 35 or classified_industry in ("Unknown", "Needs Review"):
+        final_score = min(0.50, max(0.10, score))
+    else:
+        final_score = min(0.98, max(0.15, score))
+
+    final_score = round(final_score, 2)
+    q_label = source_query or plan.original_prompt or plan.industry
+    explanation = f"Query: '{q_label}'. " + "; ".join(relevance_notes) + f". Score: {final_score:.2f}."
+    return final_score, explanation
+
+
+# -------------------------------------------------------------------------
 # 2. Lead Discovery Service & Execution Pipeline
 # -------------------------------------------------------------------------
 
@@ -460,7 +796,14 @@ class LeadDiscoveryService:
                     global_dispatch_tracker.update_discovery_job(job_id, failed_count=failed_count)
                 elif outcome == "completed" and lead_record:
                     discovered_count += 1
-                    if lead_record.email_verification_status == "verified_public":
+                    if lead_record.email_verification_status in (
+                        "verified_public",
+                        "publicly_listed",
+                        "verified_by_provider",
+                        "domain_valid",
+                        "syntax_valid",
+                        "mailbox_unverified",
+                    ):
                         verified_email_count += 1
 
                     global_dispatch_tracker.save_discovered_lead(lead_record)
@@ -678,59 +1021,109 @@ class LeadDiscoveryService:
             if found_phone:
                 verified_fields.append("phone (registry)")
 
-        # Determine strict email verification status
-        email_status = "not_found"
-        if found_email:
-            if _has_genuine_email(found_email):
-                email_status = "verified_public"
-            else:
-                email_status = "invalid"
+        # Determine truthful email verification status
+        email_status, email_status_note = evaluate_email_verification(
+            email=found_email,
+            provider_verified=False,
+            delivery_confirmed=False,
+        )
 
-        # Determine phone verification status
-        phone_status = "verified_public" if (found_phone and len(found_phone) >= 7) else "not_found"
+        # Determine truthful phone verification status (preserves string, flags corruption)
+        phone_status, phone_status_note = evaluate_phone_verification(
+            phone=found_phone,
+            provider_verified=False,
+        )
 
-        # Relevance scoring & explanation
-        relevance_score = 0.85
-        relevance_notes = []
+        # Classify industry based on evidence (company name, description, keywords, url)
+        raw_keywords = candidate.metadata.get("directory_facts", {}).get("keywords") if candidate.metadata.get("directory_facts") else plan.keywords
+        classified_industry, industry_conf, industry_reason = classify_company_industry(
+            company_name=company_name,
+            description=business_desc,
+            keywords=raw_keywords,
+            source_url=sanitized_url,
+            plan_industry=plan.industry,
+        )
 
-        target_ind = (plan.industry or "").lower()
-        if target_ind and (target_ind in company_name.lower() or target_ind in business_desc.lower()):
-            relevance_score += 0.08
-            relevance_notes.append(f"Industry '{plan.industry}' matched")
-
-        target_loc = (plan.location_city or plan.location_country or "").lower()
-        if target_loc and (target_loc in business_desc.lower() or target_loc in sanitized_url.lower()):
-            relevance_score += 0.05
-            relevance_notes.append(f"Location '{target_loc.title()}' matched")
-
-        if email_status == "verified_public":
-            relevance_notes.append("Verified public email available")
+        # Evidence tracking in verified_fields
+        if direct_facts:
+            verified_fields.extend(["company_name (registry)", "website (official)", "description (registry)"])
         else:
-            relevance_notes.append("No public contact email confirmed on page")
+            if not any("company_name" in vf for vf in verified_fields):
+                verified_fields.append("company_name (website)")
+            if not any("description" in vf for vf in verified_fields):
+                if business_desc and len(business_desc) >= 35:
+                    verified_fields.append("description (meta/page)")
+                else:
+                    verified_fields.append("description (Needs Review)")
 
-        query_used = getattr(candidate, "source_query", "") or getattr(candidate, "query", "") or plan.industry
-        explanation = f"Matched via {query_used}. " + "; ".join(relevance_notes) + "."
-        relevance_score = min(0.99, round(relevance_score, 2))
+        if classified_industry in ("Unknown", "Needs Review"):
+            verified_fields.append(f"industry ({classified_industry})")
+        else:
+            verified_fields.append(f"industry (classified: {classified_industry})")
+
+        if found_email and email_status in ("publicly_listed", "verified_by_provider", "verified_public"):
+            if not any("email" in vf for vf in verified_fields):
+                verified_fields.append("email (website contact)")
+        else:
+            if not any("email" in vf for vf in verified_fields):
+                verified_fields.append("email (Needs Review)")
+
+        if found_phone and phone_status in ("publicly_listed", "verified_by_provider", "verified_public"):
+            if not any("phone" in vf for vf in verified_fields):
+                verified_fields.append("phone (website)")
+        elif phone_status == "needs_review":
+            verified_fields.append("phone (Needs Review: corrupted)")
+        else:
+            if not any("phone" in vf for vf in verified_fields):
+                verified_fields.append("phone (Needs Review)")
+
+        # Dynamic evidence-backed relevance scoring
+        target_city = plan.location_city or candidate.metadata.get("city") or ""
+        target_country = plan.location_country or candidate.metadata.get("country") or ""
+        relevance_score, explanation = calculate_lead_relevance(
+            plan=plan,
+            company_name=company_name,
+            business_desc=business_desc,
+            classified_industry=classified_industry,
+            industry_confidence=industry_conf,
+            city=target_city,
+            country=target_country,
+            website=sanitized_url,
+            email=found_email,
+            email_status=email_status,
+            phone=found_phone,
+            phone_status=phone_status,
+            source_query=getattr(candidate, "source_query", "") or getattr(candidate, "query", ""),
+        )
 
         lead_id = f"lead-{uuid.uuid4().hex[:10]}"
         now_iso = datetime.now(timezone.utc).isoformat()
         is_live_source = (getattr(search_provider, "provider_id", "") != "directory")
+
+        # Distinguish company website from directory source in source_urls & discovery_source
+        if direct_facts:
+            discovery_source_label = "Public Business Directory"
+            registry_url = "https://agentdesk.directory/registry"
+            if registry_url not in source_urls:
+                source_urls.append(registry_url)
+        else:
+            discovery_source_label = search_provider.display_name
 
         lead = DiscoveredLeadRecord(
             id=lead_id,
             job_id=job_id,
             company_name=company_name or domain.capitalize(),
             website=sanitized_url,
-            industry=plan.industry,
-            city=plan.location_city or candidate.metadata.get("city") or "",
-            country=plan.location_country or candidate.metadata.get("country") or "",
+            industry=classified_industry,
+            city=target_city,
+            country=target_country,
             services_description=business_desc[:300] if business_desc else "Commercial services provider",
-            email=found_email if email_status == "verified_public" else (found_email or ""),
+            email=found_email or "",
             email_verification_status=email_status,
-            phone=found_phone,
+            phone=found_phone or "",
             phone_verification_status=phone_status,
             source_urls=source_urls,
-            discovery_source=search_provider.display_name,
+            discovery_source=discovery_source_label,
             discovery_query=getattr(candidate, "source_query", "") or getattr(candidate, "query", "") or plan.original_prompt,
             discovered_at=now_iso,
             relevance_score=relevance_score,
@@ -824,10 +1217,11 @@ class LeadDiscoveryService:
                 if tel_clean and len(tel_clean) >= 7:
                     found_phones.add(tel_clean)
 
-        phone_regex = r'(?:\+?\d{1,3}[-.\s]?)?\(?\d{2,4}\)?[-.\s]?\d{3,4}[-.\s]?\d{3,4}'
+        phone_regex = r'(?:\+?\d{1,4}[-.\s]?)?\(?\d{2,5}\)?[-.\s]?\d{3,4}[-.\s]?\d{3,4}(?:[-.\s]?\d{1,4})?'
         for match in re.findall(phone_regex, soup.get_text()):
             clean_m = match.strip()
-            if len(re.sub(r'\D', '', clean_m)) >= 7:
+            digits = re.sub(r'\D', '', clean_m)
+            if len(digits) >= 7 and not is_scientific_notation_corrupted(clean_m):
                 found_phones.add(clean_m)
 
         cleaned_phones = list(dict.fromkeys(found_phones))[:3]

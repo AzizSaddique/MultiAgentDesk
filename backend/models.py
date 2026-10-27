@@ -254,12 +254,15 @@ class DiscoveredLeadRecord(BaseModel):
     email: Optional[str] = ""
     email_verification_status: str = Field(
         default="not_found",
-        description="Verification state: 'verified_public', 'found_unverified', 'not_found', or 'invalid'"
+        description="Verification state: 'publicly_listed', 'domain_valid', 'syntax_valid', 'mailbox_unverified', 'verified_by_provider', 'needs_review', 'not_found', 'invalid', or legacy 'verified_public'"
     )
-    phone: Optional[str] = ""
+    phone: Optional[str] = Field(
+        default="",
+        description="Raw phone number preserved as string (preserves country code, plus sign, and leading zeros)"
+    )
     phone_verification_status: str = Field(
         default="not_found",
-        description="Phone verification: 'verified_public', 'unverified', or 'not_found'"
+        description="Phone verification: 'publicly_listed', 'syntax_valid', 'verified_by_provider', 'needs_review', 'not_found', or legacy 'verified_public'"
     )
     source_urls: List[str] = Field(default_factory=list, description="All public source URLs confirming these facts")
     discovery_source: str = Field(default="google-search", description="Provider that first found this company")

@@ -836,8 +836,18 @@ async def transfer_leads_to_outreach(request: TransferToOutreachRequest):
                     else:
                         missing_count += 1
                     continue
-
-        has_verified_email = (lead_data.get("email_verification_status") == "verified_public")
+        VALID_DISCOVERED_EMAIL_STATUSES = {
+            "verified_public",
+            "publicly_listed",
+            "verified_by_provider",
+            "domain_valid",
+            "syntax_valid",
+            "mailbox_unverified",
+        }
+        has_verified_email = (
+            lead_data.get("email_verification_status") in VALID_DISCOVERED_EMAIL_STATUSES
+            and bool(lead_data.get("email"))
+        )
         public_email = lead_data.get("email") if has_verified_email else "(No public email listed)"
 
         # Prepare lead record for personalized draft generation

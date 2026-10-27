@@ -389,9 +389,30 @@ export const LeadDiscovery: React.FC<LeadDiscoveryProps> = ({
   const getVerificationBadge = (status: string) => {
     switch (status) {
       case 'verified_public':
+      case 'publicly_listed':
         return (
-          <span className="badge badge-active" title="Authentic public business email verified on official corporate domain">
-            <CheckCircleIcon size={12} /> Verified Public
+          <span className="badge badge-active" title="Authentic public business email listed on official website or registry; mailbox unverified">
+            <CheckCircleIcon size={12} /> Publicly Listed
+          </span>
+        );
+      case 'verified_by_provider':
+        return (
+          <span className="badge badge-cyan" title="Operational inbox status verified by email verification provider">
+            <CheckCircleIcon size={12} /> Provider Verified
+          </span>
+        );
+      case 'syntax_valid':
+      case 'domain_valid':
+      case 'mailbox_unverified':
+        return (
+          <span className="badge badge-cyan" title="Email syntax and domain format are valid; mailbox delivery unverified">
+            <CheckCircleIcon size={12} /> Syntax Valid
+          </span>
+        );
+      case 'needs_review':
+        return (
+          <span className="badge badge-warning" title="Field data requires manual operator review">
+            <AlertTriangleIcon size={12} /> Needs Review
           </span>
         );
       case 'found_unverified':
@@ -1064,7 +1085,10 @@ export const LeadDiscovery: React.FC<LeadDiscoveryProps> = ({
               style={{ width: '180px', fontSize: '0.8rem' }}
             >
               <option value="">All Verification States</option>
-              <option value="verified_public">Verified Public ({verificationCounts.verified_public || 0})</option>
+              <option value="verified_public">Verified / Public ({verificationCounts.verified_public || 0})</option>
+              <option value="publicly_listed">Publicly Listed ({verificationCounts.publicly_listed || 0})</option>
+              <option value="verified_by_provider">Provider Verified ({verificationCounts.verified_by_provider || 0})</option>
+              <option value="needs_review">Needs Review ({verificationCounts.needs_review || 0})</option>
               <option value="found_unverified">Unverified ({verificationCounts.found_unverified || 0})</option>
               <option value="not_found">No Email Listed ({verificationCounts.not_found || 0})</option>
               <option value="invalid">Invalid ({verificationCounts.invalid || 0})</option>
@@ -1231,7 +1255,13 @@ export const LeadDiscovery: React.FC<LeadDiscoveryProps> = ({
                       <td>
                         {lead.phone ? (
                           <div style={{ display: 'flex', alignItems: 'center', gap: '0.3rem', fontFamily: 'var(--font-mono)', fontSize: '0.75rem' }}>
-                            <PhoneIcon size={12} color="var(--accent-cyan)" /> {lead.phone}
+                            <PhoneIcon size={12} color={lead.phone_verification_status === 'needs_review' ? 'var(--accent-amber)' : 'var(--accent-cyan)'} />
+                            <span>{lead.phone}</span>
+                            {lead.phone_verification_status === 'needs_review' && (
+                              <span className="badge badge-warning" style={{ fontSize: '0.62rem', padding: '0.05rem 0.3rem' }} title="Phone number flagged for operator review">
+                                Needs Review
+                              </span>
+                            )}
                           </div>
                         ) : (
                           <span style={{ color: 'var(--text-muted)', fontSize: '0.75rem' }}>—</span>

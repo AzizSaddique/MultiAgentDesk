@@ -790,7 +790,19 @@ class DispatchTracker:
         page_size: int = 25,
         **kwargs,
     ) -> Tuple[List[Dict[str, Any]], int, int, Dict[str, int]]:
-        default_counts = {"all": 0, "verified_public": 0, "found_unverified": 0, "not_found": 0, "invalid": 0}
+        default_counts = {
+            "all": 0,
+            "verified_public": 0,
+            "publicly_listed": 0,
+            "verified_by_provider": 0,
+            "domain_valid": 0,
+            "syntax_valid": 0,
+            "mailbox_unverified": 0,
+            "needs_review": 0,
+            "found_unverified": 0,
+            "not_found": 0,
+            "invalid": 0,
+        }
         if not self._db_path:
             return [], 0, 0, default_counts
 
@@ -804,17 +816,36 @@ class DispatchTracker:
                         (job_id,)
                     )
                     counts = dict(default_counts)
-                    for row in cur.fetchall():
-                        counts[row[0]] = row[1]
-                    counts["all"] = sum(v for k, v in counts.items() if k != "all")
+                    raw_rows = cur.fetchall()
+                    total_leads = 0
+                    for status_val, status_count in raw_rows:
+                        counts[status_val] = status_count
+                        total_leads += status_count
+                    counts["all"] = total_leads
+
+                    # Legacy compatibility: 'verified_public' in counts represents all valid/public emails if not explicitly set
+                    if counts["verified_public"] == 0:
+                        counts["verified_public"] = (
+                            counts.get("publicly_listed", 0)
+                            + counts.get("verified_by_provider", 0)
+                            + counts.get("domain_valid", 0)
+                            + counts.get("syntax_valid", 0)
+                            + counts.get("mailbox_unverified", 0)
+                        )
 
                     # 2. Filter clauses
                     where_clauses = ["job_id = ?"]
                     params = [job_id]
 
                     if email_status and email_status.strip().lower() not in ("all", ""):
-                        where_clauses.append("email_verification_status = ?")
-                        params.append(email_status.strip().lower())
+                        req_status = email_status.strip().lower()
+                        if req_status == "verified_public":
+                            where_clauses.append(
+                                "email_verification_status IN ('verified_public', 'publicly_listed', 'verified_by_provider', 'domain_valid', 'syntax_valid', 'mailbox_unverified')"
+                            )
+                        else:
+                            where_clauses.append("email_verification_status = ?")
+                            params.append(req_status)
 
                     if research_status and research_status.strip().lower() not in ("all", ""):
                         where_clauses.append("research_status = ?")
@@ -991,6 +1022,21 @@ class DispatchTracker:
             clean = (val or "").replace('"', '""')
             return f'"{clean}"'
 
+        def format_phone_csv(val: Optional[str]) -> str:
+            """
+            Formats phone numbers for spreadsheet exports (CSV).
+            Encapsulates string with formula syntax '="<phone>"' to prevent spreadsheet software
+            (Excel, Google Sheets, Calc) from stripping leading zeros ('03111111926' -> '3111111926')
+            or converting international numbers to scientific notation ('+924235789000' -> '9.23E+11').
+            Preserves corrupted numbers as literal text without inventing digits.
+            """
+            if not val:
+                return '""'
+            clean = str(val).strip().replace('"', '""')
+            if not clean:
+                return '""'
+            return f'"=""{clean}"""'
+
         rows = [",".join(headers)]
         for item in leads:
             urls_str = "; ".join(item.get("source_urls", []))
@@ -1004,7 +1050,7 @@ class DispatchTracker:
                 escape_csv(item["services_description"]),
                 escape_csv(item["email"]),
                 escape_csv(item["email_verification_status"]),
-                escape_csv(item["phone"]),
+                format_phone_csv(item["phone"]),
                 escape_csv(item["phone_verification_status"]),
                 escape_csv(f"{item['relevance_score']:.2f}"),
                 escape_csv(item["relevance_explanation"]),

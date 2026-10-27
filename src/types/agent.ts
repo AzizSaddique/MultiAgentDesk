@@ -235,9 +235,26 @@ export interface DiscoveredLeadRecord {
   country?: string;
   services_description?: string;
   email?: string;
-  email_verification_status: 'verified_public' | 'found_unverified' | 'not_found' | 'invalid';
+  email_verification_status:
+    | 'publicly_listed'
+    | 'syntax_valid'
+    | 'domain_valid'
+    | 'mailbox_unverified'
+    | 'verified_by_provider'
+    | 'needs_review'
+    | 'not_found'
+    | 'invalid'
+    | 'verified_public'
+    | 'found_unverified';
   phone?: string;
-  phone_verification_status: 'verified_public' | 'unverified' | 'not_found';
+  phone_verification_status:
+    | 'publicly_listed'
+    | 'syntax_valid'
+    | 'verified_by_provider'
+    | 'needs_review'
+    | 'not_found'
+    | 'verified_public'
+    | 'unverified';
   source_urls: string[];
   discovery_source: string;
   discovery_query: string;

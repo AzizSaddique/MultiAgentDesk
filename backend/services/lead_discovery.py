@@ -734,6 +734,7 @@ class LeadDiscoveryService:
             unique_results: List[SearchResult] = []
             seen_domains: Set[str] = set()
             seen_names: Set[str] = set()
+            seen_phones: Set[str] = set()
             duplicate_count = 0
 
             for r in raw_results:
@@ -795,6 +796,16 @@ class LeadDiscoveryService:
                     failed_count += 1
                     global_dispatch_tracker.update_discovery_job(job_id, failed_count=failed_count)
                 elif outcome == "completed" and lead_record:
+                    # Phone number deduplication across records
+                    if lead_record.phone:
+                        clean_p = re.sub(r'\D', '', lead_record.phone)
+                        if clean_p and len(clean_p) >= 7:
+                            if clean_p in seen_phones:
+                                duplicate_count += 1
+                                global_dispatch_tracker.update_discovery_job(job_id, duplicate_count=duplicate_count)
+                                continue
+                            seen_phones.add(clean_p)
+
                     discovered_count += 1
                     if lead_record.email_verification_status in (
                         "verified_public",
@@ -871,12 +882,17 @@ class LeadDiscoveryService:
         q1 = f"{industry_str} {loc_str}".strip()
         queries.append(q1)
 
-        # Query 2: Industry + official website / contact
-        if loc_str:
-            q2 = f"{industry_str} {loc_str} official website contact".strip()
+        # Query 2: Focused C&I queries if solar requested
+        if "solar" in industry_str.lower() or any("solar" in kw.lower() for kw in (plan.keywords or [])):
+            queries.append(f"commercial industrial solar EPC {loc_str}".strip())
+            queries.append(f"industrial rooftop solar contractor {loc_str}".strip())
+            queries.append(f"turnkey solar net metering {loc_str}".strip())
         else:
-            q2 = f"{industry_str} official website commercial".strip()
-        queries.append(q2)
+            # Standard industry + official website / contact
+            if loc_str:
+                queries.append(f"{industry_str} {loc_str} official website contact".strip())
+            else:
+                queries.append(f"{industry_str} official website commercial".strip())
 
         # Query 3: Specific keywords if available
         if plan.keywords:
@@ -1060,6 +1076,24 @@ class LeadDiscoveryService:
             verified_fields.append(f"industry ({classified_industry})")
         else:
             verified_fields.append(f"industry (classified: {classified_industry})")
+
+        # Extract Lahore presence and C&I fit evidence
+        text_corpus = ((html_content or "") + " " + business_desc + " " + (candidate.snippet or "")).lower()
+        lahore_kw = ["lahore", "gulberg", "dha", "johar town", "model town", "kot lakhpat", "sundar", "quaid-e-azam", "raiwind", "canal road", "ferozepur road", "lesco"]
+        lahore_matches = [k for k in lahore_kw if k in text_corpus]
+        if lahore_matches:
+            target_city = "Lahore"
+            target_country = "Pakistan"
+            verified_fields.append(f"lahore_presence (evidence: {', '.join(lahore_matches[:3])})")
+        elif plan.location_city and plan.location_city.lower() == "lahore":
+            verified_fields.append("lahore_presence (Needs Review: unconfirmed in text)")
+
+        ci_kw = ["commercial", "industrial", "c&i", "rooftop", "epc", "mw", "megawatt", "factory", "factories", "manufacturing", "textile", "warehouse", "cold storage", "hospital", "plaza", "net-metering", "lesco net metering", "bess"]
+        ci_matches = [k for k in ci_kw if k in text_corpus]
+        if ci_matches:
+            verified_fields.append(f"commercial_fit (evidence: {', '.join(ci_matches[:4])})")
+        else:
+            verified_fields.append("commercial_fit (Needs Review: general)")
 
         if found_email and email_status in ("publicly_listed", "verified_by_provider", "verified_public"):
             if not any("email" in vf for vf in verified_fields):

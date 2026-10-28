@@ -58,10 +58,18 @@ const DEFAULT_SEARCH_PROVIDERS: SearchProviderInfo[] = [
   {
     id: 'auto',
     name: 'Auto-Select Best Available',
-    description: 'Automatically routes to highest priority configured commercial provider, falling back to public directories.',
+    description: 'Automatically routes to highest priority configured commercial provider, falling back to DuckDuckGo live search.',
     is_configured: true,
     requires_key: false,
     notice: 'Active route: Automatic Provider Selection',
+  },
+  {
+    id: 'duckduckgo',
+    name: 'DuckDuckGo Live Search',
+    description: 'Real-time web search without external API key requirements. Discovers live company websites directly.',
+    is_configured: true,
+    requires_key: false,
+    notice: 'Live web search available out-of-the-box. Zero API keys required.',
   },
   {
     id: 'tavily',
@@ -439,8 +447,23 @@ export const LeadDiscovery: React.FC<LeadDiscoveryProps> = ({
 
   // Source attribution badge helper
   const getSourceBadge = (source: string, isLive?: boolean) => {
-    const isDir = !isLive || source?.toLowerCase().includes('directory');
-    if (isDir) {
+    const sLower = (source || '').toLowerCase();
+    if (!isLive || sLower.includes('seed') || sLower.includes('predefined') || sLower.includes('audit')) {
+      return (
+        <span
+          className="badge"
+          style={{
+            background: 'rgba(148, 163, 184, 0.15)',
+            color: 'var(--text-secondary)',
+            border: '1px solid rgba(148, 163, 184, 0.3)',
+          }}
+          title="Predefined seed record from verified offline audit roster. Not retrieved from live search."
+        >
+          <BuildingIcon size={11} /> Predefined Seed Data
+        </span>
+      );
+    }
+    if (sLower.includes('directory')) {
       return (
         <span
           className="badge"
@@ -449,7 +472,7 @@ export const LeadDiscovery: React.FC<LeadDiscoveryProps> = ({
             color: 'var(--text-secondary)',
             border: '1px solid rgba(148, 163, 184, 0.25)',
           }}
-          title="Extracted from public business trade directory (Offline safe registry)"
+          title="Extracted from public trade registry"
         >
           <BuildingIcon size={11} /> Public Directory
         </span>
@@ -458,9 +481,9 @@ export const LeadDiscovery: React.FC<LeadDiscoveryProps> = ({
     return (
       <span
         className="badge badge-cyan"
-        title="Discovered through live web search engine and verified on official website"
+        title={`Live web discovery verified via ${source || 'Live Search'}`}
       >
-        <GlobeIcon size={11} /> {source || 'Live Web'}
+        <GlobeIcon size={11} /> {source || 'Live Search'}
       </span>
     );
   };
@@ -1228,6 +1251,13 @@ export const LeadDiscovery: React.FC<LeadDiscoveryProps> = ({
                         ) : (
                           <span style={{ fontSize: '0.72rem', color: 'var(--text-muted)' }}>No website</span>
                         )}
+                        {lead.verified_fields?.some((f) => f.startsWith('commercial_fit (evidence:')) && (
+                          <div style={{ marginTop: '0.25rem' }}>
+                            <span className="badge badge-active" style={{ fontSize: '0.64rem', padding: '0.08rem 0.35rem' }} title="Verified Commercial & Industrial Solar Work">
+                              <CheckIcon size={10} /> C&I Solar Evidenced
+                            </span>
+                          </div>
+                        )}
                       </td>
 
                       <td>
@@ -1452,18 +1482,67 @@ export const LeadDiscovery: React.FC<LeadDiscoveryProps> = ({
               </button>
             </div>
 
-            {/* Quick Metadata Grid */}
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0.75rem', marginBottom: '1.25rem' }}>
+            {/* Quick Metadata Grid: Discovery Method, Query, Email, Phone */}
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: '0.75rem', marginBottom: '1.25rem' }}>
               <div style={{ background: 'var(--bg-tertiary)', padding: '0.75rem 0.95rem', borderRadius: '8px', border: '1px solid var(--border-subtle)' }}>
-                <span style={{ fontSize: '0.7rem', color: 'var(--text-muted)', fontWeight: 600, textTransform: 'uppercase' }}>Discovery Query Used</span>
-                <div style={{ fontSize: '0.85rem', fontWeight: 600, color: 'var(--text-primary)', marginTop: '0.2rem', fontFamily: 'var(--font-mono)' }}>
-                  &quot;{evidenceLead.discovery_query}&quot;
+                <span style={{ fontSize: '0.7rem', color: 'var(--text-muted)', fontWeight: 600, textTransform: 'uppercase' }}>Discovery Method</span>
+                <div style={{ marginTop: '0.25rem' }}>
+                  {getSourceBadge(evidenceLead.discovery_source, evidenceLead.is_live)}
                 </div>
               </div>
 
               <div style={{ background: 'var(--bg-tertiary)', padding: '0.75rem 0.95rem', borderRadius: '8px', border: '1px solid var(--border-subtle)' }}>
-                <span style={{ fontSize: '0.7rem', color: 'var(--text-muted)', fontWeight: 600, textTransform: 'uppercase' }}>Public Email Verification</span>
+                <span style={{ fontSize: '0.7rem', color: 'var(--text-muted)', fontWeight: 600, textTransform: 'uppercase' }}>Discovery Query</span>
+                <div style={{ fontSize: '0.82rem', fontWeight: 600, color: 'var(--text-primary)', marginTop: '0.2rem', fontFamily: 'var(--font-mono)' }}>
+                  &quot;{evidenceLead.discovery_query || 'N/A'}&quot;
+                </div>
+              </div>
+
+              <div style={{ background: 'var(--bg-tertiary)', padding: '0.75rem 0.95rem', borderRadius: '8px', border: '1px solid var(--border-subtle)' }}>
+                <span style={{ fontSize: '0.7rem', color: 'var(--text-muted)', fontWeight: 600, textTransform: 'uppercase' }}>Public Email</span>
+                <div style={{ fontSize: '0.78rem', fontFamily: 'var(--font-mono)', marginTop: '0.15rem' }}>
+                  {evidenceLead.email || '(None listed)'}
+                </div>
                 <div style={{ marginTop: '0.25rem' }}>{getVerificationBadge(evidenceLead.email_verification_status)}</div>
+              </div>
+
+              <div style={{ background: 'var(--bg-tertiary)', padding: '0.75rem 0.95rem', borderRadius: '8px', border: '1px solid var(--border-subtle)' }}>
+                <span style={{ fontSize: '0.7rem', color: 'var(--text-muted)', fontWeight: 600, textTransform: 'uppercase' }}>Public Phone</span>
+                <div style={{ fontSize: '0.78rem', fontFamily: 'var(--font-mono)', marginTop: '0.15rem' }}>
+                  {evidenceLead.phone || '(None listed)'}
+                </div>
+                <div style={{ marginTop: '0.25rem' }}>
+                  {evidenceLead.phone_verification_status === 'needs_review' ? (
+                    <span className="badge badge-warning" style={{ fontSize: '0.65rem' }}>Needs Review</span>
+                  ) : evidenceLead.phone ? (
+                    <span className="badge badge-active" style={{ fontSize: '0.65rem' }}>Publicly Listed</span>
+                  ) : (
+                    <span className="badge" style={{ fontSize: '0.65rem', color: 'var(--text-muted)' }}>None Listed</span>
+                  )}
+                </div>
+              </div>
+            </div>
+
+            {/* Commercial-Fit and Lahore Presence Evidence */}
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0.75rem', marginBottom: '1.25rem' }}>
+              <div style={{ background: 'var(--bg-tertiary)', padding: '0.75rem 0.95rem', borderRadius: '8px', border: '1px solid var(--border-subtle)' }}>
+                <span style={{ fontSize: '0.7rem', color: 'var(--accent-cyan)', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.05em' }}>
+                  Commercial & Industrial Fit Evidence
+                </span>
+                <div style={{ fontSize: '0.82rem', color: 'var(--text-secondary)', marginTop: '0.35rem', lineHeight: 1.4 }}>
+                  {evidenceLead.verified_fields?.find((f) => f.startsWith('commercial_fit')) ||
+                    'General commercial solar EPC services (refer to business description)'}
+                </div>
+              </div>
+
+              <div style={{ background: 'var(--bg-tertiary)', padding: '0.75rem 0.95rem', borderRadius: '8px', border: '1px solid var(--border-subtle)' }}>
+                <span style={{ fontSize: '0.7rem', color: 'var(--accent-emerald)', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.05em' }}>
+                  Lahore Office & Service Coverage
+                </span>
+                <div style={{ fontSize: '0.82rem', color: 'var(--text-secondary)', marginTop: '0.35rem', lineHeight: 1.4 }}>
+                  {evidenceLead.verified_fields?.find((f) => f.startsWith('lahore_presence') || f.toLowerCase().includes('lahore')) ||
+                    `Location: ${[evidenceLead.city, evidenceLead.country].filter(Boolean).join(', ') || 'Lahore, Pakistan'}`}
+                </div>
               </div>
             </div>
 

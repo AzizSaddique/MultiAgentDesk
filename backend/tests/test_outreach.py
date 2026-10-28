@@ -25,6 +25,17 @@ from backend.providers.llm import (
 
 client = TestClient(app)
 
+@pytest.fixture(autouse=True)
+def clean_tracker(tmp_path, monkeypatch):
+    """Isolates SQLite database for each test run to protect production dispatches.db."""
+    from backend.dispatch_tracker import DispatchTracker
+    db_file = str(tmp_path / "test_outreach.db")
+    tracker = DispatchTracker(db_path=db_file)
+    monkeypatch.setattr("backend.dispatch_tracker.global_dispatch_tracker", tracker)
+    monkeypatch.setattr("backend.main.global_dispatch_tracker", tracker)
+    yield tracker
+    tracker.clear()
+
 SAMPLE_VERIFIED_LEAD = LeadRecord(
     id="live-lead-acme",
     company_name="Acme Grid Solutions",

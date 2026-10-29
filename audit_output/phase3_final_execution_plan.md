@@ -3,9 +3,11 @@
 **Plan Date:** October 28, 2026  
 **Workspace:** `C:\Users\azize\source\AgentDesk`  
 **Database File:** `storage/dispatches.db` (Queried strictly in SQLite URI read-only mode `file:storage/dispatches.db?mode=ro`)  
-**Database Backup:** `storage/dispatches.db.backup_phase3_start` (405,504 bytes, SHA-256 verified)  
+**Historical Initial Backup:** `storage/dispatches.db.backup_phase3_start` (405,504 bytes, preserved intact)  
+**Point-in-Time Pre-Execution Backup:** `storage/dispatches.db.backup_phase3_preexec_20261028_152157` (405,504 bytes, SHA-256 verified)  
 **Deliverable File:** [phase3_final_execution_plan.md](file:///C:/Users/azize/source/AgentDesk/audit_output/phase3_final_execution_plan.md)  
 **Related Reference Files:**
+- [phase3_preexecution_safety_review.md](file:///C:/Users/azize/source/AgentDesk/audit_output/phase3_preexecution_safety_review.md)
 - [phase3_evidence_verification.md](file:///C:/Users/azize/source/AgentDesk/audit_output/phase3_evidence_verification.md)
 - [phase3_evidence_verification.csv](file:///C:/Users/azize/source/AgentDesk/audit_output/phase3_evidence_verification.csv)
 - [phase3_final_reconciliation.md](file:///C:/Users/azize/source/AgentDesk/audit_output/phase3_final_reconciliation.md)
@@ -21,8 +23,8 @@ This document establishes the comprehensive, evidence-backed execution plan for 
 
 | Action | Target Record(s) | Action Type | Current DB Status | Proposed DB Status | Primary Justification |
 |:---|:---|:---:|:---:|:---:|:---|
-| **Action A** | `lead-p3-multiline-001` (Multiline Engineering Co.) | **INSERT** | *Non-existent* | `completed` (`is_live=1`) | Verified physical facility in Lahore Cantt; industrial solar portfolio (KIA Motors 109kW, Yummy Factory 200kW); 0 DB duplicates. |
-| **Action A** | `lead-p3-wattey-001` (Wattey Energy) | **INSERT** | *Non-existent* | `completed` (`is_live=1`) | Verified physical office at NASTP COLABS Cantt, Lahore; continuous-load textile mill solar EPC; 0 DB duplicates. |
+| **Action A** | `lead-p3-multiline-001` (Multiline Engineering Co.) | **INSERT** | *Non-existent* | `completed` (`is_live=1`) | Verified physical facility in Lahore Cantt; documented industrial solar portfolio (KIA Motors 109kW, Yummy Factory 200kW); 0 DB duplicates; AEDB licensing company-reported. |
+| **Action A** | `lead-p3-wattey-001` (Wattey Energy) | **INSERT** | *Non-existent* | `completed` (`is_live=1`) | Verified physical office at NASTP COLABS Cantt, Lahore; continuous-load textile mill solar EPC (FANZ Spinning Mill, Ali Enterprise); 0 DB duplicates. |
 | **Action B** | `lead-solar-012` (Scope Solar (Pvt) Ltd) | **UPDATE** | `partially_confirmed` | `confirmed` | Physical office verified at 239-R Johar Town; dedicated commercial and industrial project divisions. |
 | **Action B** | `lead-solar-070` (Alpha Solar Pakistan) | **UPDATE** | `needs_review` | `confirmed` | Lahore Head Office verified at Cavalry Ground/DHA; institutional C&I project at Lahore School of Economics; AEDB C-1. |
 | **Action B** | `lead-solar-048` (Sympl Energy (Pvt) Ltd) | **UPDATE** | `partially_confirmed` | `confirmed` | Physical office verified at 149DD CCA Phase 4 DHA Lahore; turnkey commercial plazas and multi-MW industrial portfolio. |
@@ -59,7 +61,7 @@ To prevent misleading outreach metrics, evidence is categorized into:
     - `Proton Showroom` (65 kW commercial solar)
 - **Public Contacts Discovered:** `sales@multiline.com.pk`, `amir@multiline.com.pk` (CTO); Phone: `+92-42-35700201`, `0300-4263185`.  
   *Testing Integrity Disclosure:* Mailbox was NOT pinged via SMTP handshake; telephone line was NOT dialed. Label: `publicly_listed`.
-- **Regulatory Certification Handling:** AEDB Net-Metering license claimed on official website is recorded as company-reported; qualification is strictly based on verified Lahore Cantt facilities and documented commercial projects.
+- **Regulatory Certification Handling:** AEDB Net-Metering license claimed on official website is recorded as **"company-reported, pending independent registry validation"**. Qualification is strictly based on verified Lahore Cantt facilities and documented commercial projects.
 - **Duplicate Check:** 0 collisions across normalized name, domain, email, and phone in `storage/dispatches.db`.
 
 ---
@@ -146,7 +148,7 @@ To prevent misleading outreach metrics, evidence is categorized into:
 ### Database Status Breakdown (Before vs. After)
 
 | `research_status` Value | Current Count | Post-Execution Count | Status Dynamics |
-|:---|:---:|:---:|:---|
+|:---|:---:|:---|:---|
 | `completed` | 30 | 32 | +2 (New live inserts: Multiline, Wattey) |
 | `confirmed` | 23 | 27 | +4 (Seed updates: Scope Solar, Alpha Solar, Sympl, Sunergies) |
 | `needs_review` | 24 | 23 | -1 (Alpha Solar upgraded to `confirmed`) |
@@ -232,77 +234,135 @@ WHERE id IN ('lead-p3-multiline-001', 'lead-p3-wattey-001');
 
 ---
 
-## 5. Execution Script (Awaiting User Approval)
+## 5. Execution Script (Atomic SQLite ACID Transaction)
 
-```sql
--- ====================================================================
--- ACTION A: INSERT 2 NEW DISTINCT CANDIDATES (job-phase3-live-expansion)
--- ====================================================================
-INSERT INTO discovered_leads (
-    id, job_id, company_name, website, industry, city, country,
-    services_description, email, email_verification_status, phone,
-    phone_verification_status, source_urls, discovery_source, discovery_query,
-    discovered_at, relevance_score, relevance_explanation, research_status,
-    failure_reason, verified_fields, is_live
-) VALUES (
-    'lead-p3-multiline-001',
-    'job-phase3-live-expansion',
-    'Multiline Engineering Co.',
-    'https://multiline.com.pk',
-    'Solar Energy',
-    'Lahore',
-    'Pakistan',
-    'Founded in Lahore in 1975. Industrial power engineering and turnkey commercial/industrial solar EPC. AEDB Category C-1 net-metering certified installer with extensive commercial rooftop and civil structural engineering capabilities.',
-    'sales@multiline.com.pk',
-    'publicly_listed',
-    '+92-42-35700201',
-    'publicly_listed',
-    '["https://multiline.com.pk", "https://www.ppib.gov.pk"]',
-    'Phase 3 Live Search & AEDB Registry',
-    'Commercial solar EPC contractors industrial rooftop solar Lahore',
-    '2026-10-28T09:40:34.693676+00:00',
-    0.98,
-    'Physical Lahore Cantt facility verified (3-A Airport Road); AEDB Category C-1 commercial EPC certification verified; active industrial power and solar project references.',
-    'completed',
-    NULL,
-    '["company_name", "website", "email (publicly_listed)", "phone (publicly_listed)", "industry (Solar Energy)", "lahore_presence (3-A Airport Road, Lahore Cantt)", "commercial_fit (Turnkey C&I Solar EPC, AEDB C-1)"]',
-    1
-), (
-    'lead-p3-wattey-001',
-    'job-phase3-live-expansion',
-    'Wattey Energy',
-    'https://watteyenergy.pk',
-    'Solar Energy',
-    'Lahore',
-    'Pakistan',
-    'Engineering-led commercial and industrial solar EPC, intelligent energy automation, and digital monitoring platforms headquartered in Lahore. Specializes in continuous-load operations for textile and spinning mills across Punjab.',
-    'info@watteyenergy.pk',
-    'publicly_listed',
-    '+92 323 4578775',
-    'publicly_listed',
-    '["https://watteyenergy.pk"]',
-    'Phase 3 Live Search & Punjab Regional Contractors',
-    'Industrial solar EPC textile spinning mills Lahore Punjab',
-    '2026-10-28T09:40:34.693711+00:00',
-    0.96,
-    'Headquartered in Lahore, Pakistan; engineering-led C&I solar EPC with verified specialization in industrial textile and steel manufacturing plants.',
-    'completed',
-    NULL,
-    '["company_name", "website", "email (publicly_listed)", "phone (publicly_listed)", "industry (Solar Energy)", "lahore_presence (Lahore, Pakistan HQ)", "commercial_fit (C&I Solar EPC for Textile & Industrial Mills)"]',
-    1
-);
+When approved, the modifications must be executed using an atomic SQLite transaction in Python (`BEGIN IMMEDIATE TRANSACTION; ... COMMIT;`), ensuring that if any single assertion or validation fails, an immediate `ROLLBACK` executes, leaving `storage/dispatches.db` 100% unaltered:
 
--- ====================================================================
--- ACTION B: UPDATE STATUS FOR THE 4 CORROBORATED SEED RECORDS
--- ====================================================================
-UPDATE discovered_leads
-SET research_status = 'confirmed'
-WHERE id IN (
-    'lead-solar-012', -- Scope Solar (Pvt) Ltd
-    'lead-solar-070', -- Alpha Solar Pakistan
-    'lead-solar-048', -- Sympl Energy (Pvt) Ltd
-    'lead-solar-042'  -- Sunergies Solar Solution
-);
+```python
+import sqlite3
+import json
+
+DB_PATH = 'storage/dispatches.db'
+
+def execute_phase3_plan():
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    try:
+        # 1. Begin Immediate Transaction
+        cur.execute("BEGIN IMMEDIATE TRANSACTION;")
+
+        # Pre-execution Assertions
+        cur.execute("SELECT count(1) FROM discovered_leads;")
+        if cur.fetchone()[0] != 103:
+            raise ValueError("Pre-execution check failed: Expected exactly 103 rows.")
+
+        cur.execute("SELECT count(1) FROM discovered_leads WHERE id IN ('lead-p3-multiline-001', 'lead-p3-wattey-001');")
+        if cur.fetchone()[0] != 0:
+            raise ValueError("Pre-execution check failed: Target IDs already exist.")
+
+        # Action A: Insert 2 New Live Records
+        insert_sql = """
+        INSERT INTO discovered_leads (
+            id, job_id, company_name, website, industry, city, country,
+            services_description, email, email_verification_status, phone,
+            phone_verification_status, source_urls, discovery_source, discovery_query,
+            discovered_at, relevance_score, relevance_explanation, research_status,
+            failure_reason, verified_fields, is_live
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+        """
+        
+        multiline_row = (
+            'lead-p3-multiline-001',
+            'job-phase3-live-expansion',
+            'Multiline Engineering Co.',
+            'https://multiline.com.pk',
+            'Solar Energy',
+            'Lahore',
+            'Pakistan',
+            'Founded in Lahore in 1975. Industrial power engineering and turnkey commercial/industrial solar EPC. Company reports AEDB net-metering installer licensing on official website (licensing status pending independent registry certificate validation). Demonstrates extensive commercial rooftop and civil structural engineering capabilities with verified projects including KIA Motors (109 kW) and Yummy Factory (200 kW).',
+            'sales@multiline.com.pk',
+            'publicly_listed',
+            '+92-42-35700201',
+            'publicly_listed',
+            json.dumps(["https://multiline.com.pk", "https://multiline.com.pk/industrial_project.php", "https://multiline.com.pk/support.php"]),
+            'Phase 3 Live Search & Corporate Verification',
+            'Commercial solar EPC contractors industrial rooftop solar Lahore',
+            '2026-10-28T09:40:34.693676+00:00',
+            0.98,
+            'Physical Lahore Cantt facility verified (3-A Airport Road); commercial solar fit verified via documented industrial installations (KIA Motors 109kW, Yummy Factory 200kW); AEDB licensing is company-reported on official website and pending current independent registry certificate validation.',
+            'completed',
+            None,
+            json.dumps([
+                "company_name", "website", "email (publicly_listed)", "phone (publicly_listed)",
+                "industry (Solar Energy)", "lahore_presence (3-A Airport Road, Lahore Cantt)",
+                "commercial_fit (Turnkey C&I Solar EPC; documented industrial installations: KIA Motors, Yummy Factory)",
+                "certification (AEDB license: company-reported, pending independent registry validation)"
+            ]),
+            1
+        )
+        
+        wattey_row = (
+            'lead-p3-wattey-001',
+            'job-phase3-live-expansion',
+            'Wattey Energy',
+            'https://watteyenergy.pk',
+            'Solar Energy',
+            'Lahore',
+            'Pakistan',
+            'Engineering-led commercial and industrial solar EPC, intelligent energy automation, and digital monitoring platforms headquartered in Lahore. Specializes in continuous-load operations for textile and spinning mills across Punjab.',
+            'info@watteyenergy.pk',
+            'publicly_listed',
+            '+92 323 4578775',
+            'publicly_listed',
+            json.dumps(["https://watteyenergy.pk", "https://watteyenergy.pk/contact", "https://watteyenergy.pk/about", "https://watteyenergy.pk/commercial-solar", "https://watteyenergy.pk/clients"]),
+            'Phase 3 Live Search & Regional Contractors',
+            'Industrial solar EPC textile spinning mills Lahore Punjab',
+            '2026-10-28T09:40:34.693711+00:00',
+            0.96,
+            'Physical facility verified at NASTP COLABS Cantt, 69 Abid Majeed Rd, Cantonment, Lahore; engineering-led C&I solar EPC with verified client projects (Ali Enterprise, FANZ Spinning Mill, Mall of Mureedkay).',
+            'completed',
+            None,
+            json.dumps([
+                "company_name", "website", "email (publicly_listed)", "phone (publicly_listed)",
+                "industry (Solar Energy)", "lahore_presence (NASTP, COLABS Cantt, 69 Abid Majeed Rd, Cantonment, Lahore)",
+                "commercial_fit (C&I Solar EPC; documented client deployments: FANZ Spinning Mill, Ali Enterprise, Mall of Mureedkay)"
+            ]),
+            1
+        )
+        
+        cur.execute(insert_sql, multiline_row)
+        cur.execute(insert_sql, wattey_row)
+
+        # Action B: Update Status for 4 Corroborated Seed Records
+        cur.execute("""
+            UPDATE discovered_leads
+            SET research_status = 'confirmed'
+            WHERE id IN ('lead-solar-012', 'lead-solar-070', 'lead-solar-048', 'lead-solar-042');
+        """)
+
+        # Post-execution Assertions
+        cur.execute("SELECT count(1) FROM discovered_leads;")
+        if cur.fetchone()[0] != 105:
+            raise ValueError("Post-execution assertion failed: Expected exactly 105 rows.")
+
+        cur.execute("SELECT count(1) FROM discovered_leads WHERE is_live = 1;")
+        if cur.fetchone()[0] != 35:
+            raise ValueError("Post-execution assertion failed: Expected exactly 35 live rows.")
+
+        cur.execute("SELECT count(1) FROM discovered_leads WHERE research_status = 'confirmed';")
+        if cur.fetchone()[0] != 27:
+            raise ValueError("Post-execution assertion failed: Expected exactly 27 confirmed rows.")
+
+        # Commit Transaction
+        conn.commit()
+        print("Phase 3 Execution Plan completed successfully. All assertions passed.")
+
+    except Exception as e:
+        conn.rollback()
+        print(f"Transaction failed and was rolled back: {e}")
+        raise e
+    finally:
+        conn.close()
 ```
 
 ---
@@ -353,28 +413,29 @@ ORDER BY id;
 
 ---
 
-## 7. Rollback Procedure
+## 7. Rollback Architecture
 
-If any unexpected error occurs or the operator decides to revert the changes, restore directly from the pristine snapshot:
-- **Backup File Path:** `storage/dispatches.db.backup_phase3_start`
+### Safe Point-in-Time Rollback (Immediate Snapshot)
+Restoring from the historical `phase3_start` backup is unsafe as a routine rollback mechanism once future database operations have taken place, because it destroys intervening dispatches, drafts, and campaign state.  
+For this specific execution, rollback restores from the immediate pre-execution snapshot:
+- **Pre-Execution Snapshot Path:** `storage/dispatches.db.backup_phase3_preexec_20261028_152157`
 - **File Size:** 405,504 bytes
-- **SHA-256 Checksum:** `8680d287bb1f09bb2fc491d9652a23e803d3fcdd84e7fec325e6e343ca16bc2a`
+- **SHA-256 Checksum:** `caafb07cc8f7481156b71c677589aa0c0165e9aa74dce05d7fa5a45ac82500bd`
+- **Preserved Initial Boundary:** `storage/dispatches.db.backup_phase3_start` remains permanently preserved.
 
-### Execution Command (PowerShell)
+### Rollback Commands:
 ```powershell
-Copy-Item -Path "storage/dispatches.db.backup_phase3_start" -Destination "storage/dispatches.db" -Force
+Copy-Item -Path "storage/dispatches.db.backup_phase3_preexec_20261028_152157" -Destination "storage/dispatches.db" -Force
 ```
-
-### Execution Command (Python)
 ```python
 import shutil
-shutil.copy2("storage/dispatches.db.backup_phase3_start", "storage/dispatches.db")
+shutil.copy2("storage/dispatches.db.backup_phase3_preexec_20261028_152157", "storage/dispatches.db")
 ```
 
 ---
 
 ## 8. Safety & Compliance Confirmation
 
-- **Database State:** Currently unmodified (103 rows).
+- **Database State:** Currently unmodified (**103 rows**).
 - **Outreach Safety:** Zero outreach drafts generated; zero emails or messages dispatched.
 - **Operator Gate:** Awaiting explicit operator approval before executing any statement.

@@ -1,138 +1,141 @@
-# Phase 3 Execution Results & Precondition Audit Report
+# Phase 3 Execution Results & Database Migration Audit Report
 
-**Report Date:** October 28, 2026  
+**Report Date:** October 30, 2026  
 **Workspace:** `C:\Users\azize\source\AgentDesk`  
-**Database File:** `storage/dispatches.db`  
+**Execution Path:** **PATH 2 — Direct Execution on Active Database (Preserving 20 Non-Solar Leads)**  
+**Active Database File:** `storage/dispatches.db`  
 **Historical Baseline Backup:** `storage/dispatches.db.backup_phase3_start`  
-**Pre-Execution Point-in-Time Backup:** `storage/dispatches.db.backup_phase3_preexec_20261028_152157`  
-**Status:** **EXECUTION ABORTED & SAFELY ROLLED BACK (ZERO MUTATIONS COMMITTED)**  
+**Point-in-Time Pre-Execution Backup:** `storage/dispatches.db.backup_phase3_preexec_20261028_152157`  
+**Transaction Outcome:** **COMMITTED SUCCESSFULLY (SINGLE ATOMIC SQLITE TRANSACTION)**  
 
 ---
 
-## 1. Executive Summary & Transaction Outcome
+## 1. Executive Summary
 
-In strict adherence to the **Mandatory Safety Requirements**:
-> *"1. Before writing, verify that the current database matches the expected pre-execution state and that the timestamped backup exists and has the expected SHA-256."*  
-> *"3. Abort and roll back if any precondition, uniqueness check, schema validation, or postcondition fails."*  
-> *"If any precondition fails, do not force the import. Roll back and report the issue."*  
+Operator approval was explicitly granted for **Path 2**: executing the six approved Phase 3 modifications against the active database within a single atomic SQLite transaction while preserving all 20 intervening German IoT (`job-a7389689e2`) and European B2B SaaS (`job-893d08794b`) leads.
 
-The automated execution script performed comprehensive pre-execution checks prior to writing any data to `storage/dispatches.db`. **The precondition check detected a database checksum and row-count discrepancy and immediately aborted execution with a clean rollback.**
-
-Zero rows were inserted, zero rows were updated, and zero existing backups were modified or overwritten.
+All preflight checks, atomic operations, post-transaction invariants, collision validations, test suite runs, and frontend production builds completed with **100% success**.
 
 ```
-[SAFETY PRECONDITION TRIGGERED]
-Expected Pre-Execution DB SHA-256: caafb07cc8f7481156b71c677589aa0c0165e9aa74dce05d7fa5a45ac82500bd
-Actual Active DB SHA-256:          446ad72198f9f87387346965d615735ff7dfbc56c8d920bbfe0330f08aa9ad56
-Expected Total Rows in DB:         103 (70 seed, 33 live)
-Actual Total Rows in DB:           123 (90 seed/directory, 33 live)
-Lahore Solar EPC Rows in DB:       103 (100% intact and unaltered)
-Action Taken:                      Execution strictly halted. Zero mutations forced. DB preserved.
+========================= TRANSACTION SUMMARY =========================
+Pre-Execution Database Rows:   123 (70 seed solar, 33 live solar, 20 non-solar)
+Post-Execution Database Rows:  125 (70 seed solar, 35 live solar, 20 non-solar)
+Net Changes Committed:         +2 INSERTS, 4 UPDATES ('confirmed'), 0 DELETIONS
+Atomic Transaction Mode:       BEGIN IMMEDIATE TRANSACTION ... COMMIT
+Rollback Invocations:          0 (Zero failures; clean commit)
+Outreach Blackout:             Enforced (0 drafts generated, 0 messages sent)
+Phase 4 Lead Discovery:        NOT STARTED (Awaiting operator review)
+========================================================================
 ```
 
 ---
 
-## 2. Backup Verification & Parity Results
+## 2. Step 1 — Preflight Verification Results
 
-Both required pre-execution backup files exist on disk, are completely intact, and match their documented baseline checksum:
+Prior to opening the write transaction, all eight mandatory read-only preflight checks were executed and validated:
 
-| Backup File Path | File Size | Expected SHA-256 | Actual SHA-256 | Integrity Status |
+1. **Active Database Row Count:** Exactly **123 rows** present in `discovered_leads`.
+2. **Dataset Breakdown:**
+   - Seed solar records (`job-lahore-solar-c-and-i`, `is_live = 0`): **70 rows** (PASS)
+   - Live solar records (`job-31700f20dc` + `job-live-expansion-lahore`, `is_live = 1`): **33 rows** (PASS)
+   - Additional non-solar records (`job-a7389689e2` + `job-893d08794b`, `is_live = 0`): **20 rows** (PASS)
+3. **Non-Solar Integrity Verification:** All 20 German IoT and European SaaS records snapshot-verified and confirmed intact prior to write.
+4. **Backup Cryptographic Integrity:**
+   - `storage/dispatches.db.backup_phase3_preexec_20261028_152157` (405,504 bytes): SHA-256 `caafb07cc8f7481156b71c677589aa0c0165e9aa74dce05d7fa5a45ac82500bd` (PASS)
+   - `storage/dispatches.db.backup_phase3_start` (405,504 bytes): SHA-256 `caafb07cc8f7481156b71c677589aa0c0165e9aa74dce05d7fa5a45ac82500bd` (PASS)
+5. **Schema & Constraints Inspection:**
+   - Primary key: `id` (UNIQUE, NOT NULL).
+   - Foreign key & indexing: `idx_disc_leads_email_stat`, `idx_disc_leads_job`.
+   - All 22 columns aligned with application data models.
+6. **Proposed IDs Non-Existence:**
+   - `lead-p3-multiline-001`: Absent (0 collisions).
+   - `lead-p3-wattey-001`: Absent (0 collisions).
+7. **Approved Existing Records Status Pre-Check:**
+   - `lead-solar-012` (Scope Solar): `partially_confirmed` (PASS)
+   - `lead-solar-070` (Alpha Solar): `needs_review` (PASS)
+   - `lead-solar-048` (Sympl Energy): `partially_confirmed` (PASS)
+   - `lead-solar-042` (Sunergies Solar Solution): `partially_confirmed` (PASS)
+   - `lead-solar-040` (Solar Junction): `partially_confirmed` (PASS)
+   - `lead-solar-069` (PentaH Energy): `partially_confirmed` (PASS)
+8. **Pre-Execution Collision Check:** Zero duplicates across normalized company names, domains, emails, and phone numbers for both candidates against all 123 active records.
+
+---
+
+## 3. Step 2 — Approved Changes Committed
+
+Within a single atomic SQLite transaction (`BEGIN IMMEDIATE TRANSACTION; ... COMMIT;`), the six approved changes were executed:
+
+### Action A — Insert 2 New Live Records
+1. **`lead-p3-multiline-001` (Multiline Engineering Co.):**
+   - **Domain:** `https://multiline.com.pk`
+   - **Location:** `3-A/1, Off Airport Road, Opposite Toyota Airport Motors, Lahore Cantt, Lahore, Pakistan`
+   - **Research Status:** `completed` (`is_live = 1`)
+   - **Certification Handling:** In accordance with safety rules, AEDB licensing is explicitly recorded as company-reported:
+     > *"Company reports AEDB net-metering installer licensing on official website (licensing status pending independent registry certificate validation)."*
+   - **Evidence Basis:** Operating in Lahore Cantt since 1975; verified industrial solar installations including KIA Motors (109 kW) and Yummy Factory (200 kW).
+2. **`lead-p3-wattey-001` (Wattey Energy):**
+   - **Domain:** `https://watteyenergy.pk`
+   - **Location:** `NASTP, COLABS Cantt – Old Airport Building, 69 Abid Majeed Rd, Cantonment, Lahore, Punjab, Pakistan`
+   - **Research Status:** `completed` (`is_live = 1`)
+   - **Evidence Basis:** Physical NASTP office verified; turnkey C&I solar installations for textile operations (Ali Enterprise, FANZ Spinning Mill, Mall of Mureedkay).
+
+### Action B — Update 4 Seed Records to `confirmed`
+1. `lead-solar-012` (Scope Solar (Pvt) Ltd): `partially_confirmed` $\to$ `confirmed`
+2. `lead-solar-070` (Alpha Solar Pakistan): `needs_review` $\to$ `confirmed`
+3. `lead-solar-048` (Sympl Energy (Pvt) Ltd): `partially_confirmed` $\to$ `confirmed`
+4. `lead-solar-042` (Sunergies Solar Solution): `partially_confirmed` $\to$ `confirmed`
+
+### Action C — Kept Unchanged
+1. `lead-solar-040` (Solar Junction (Pvt) Ltd): Remains `partially_confirmed`
+2. `lead-solar-069` (PentaH Energy): Remains `partially_confirmed`
+
+---
+
+## 4. Step 3 — Post-Transaction Validation Results
+
+Post-transaction assertions were verified inside and outside the transaction:
+
+| Post-Execution Metric | Target / Expected | Actual Result | Verification Status |
+|:---|:---:|:---:|:---:|
+| **Total Rows in `discovered_leads`** | **125** | **125** | **PASS** |
+| ↳ *Original Seed Solar Rows (`job-lahore-solar-c-and-i`, `is_live=0`)* | 70 | 70 | **PASS (Intact)** |
+| ↳ *Live Solar Rows (`is_live=1`)* | 35 | 35 (19 + 14 + 2) | **PASS (+2 Live)** |
+| ↳ *Intervening Non-Solar Rows (`is_live=0`)* | 20 | 20 | **PASS (Byte-identical)** |
+| **`lead-p3-multiline-001` Count** | 1 | 1 | **PASS** |
+| **`lead-p3-wattey-001` Count** | 1 | 1 | **PASS** |
+| **`lead-solar-012` Research Status** | `confirmed` | `confirmed` | **PASS** |
+| **`lead-solar-070` Research Status** | `confirmed` | `confirmed` | **PASS** |
+| **`lead-solar-048` Research Status** | `confirmed` | `confirmed` | **PASS** |
+| **`lead-solar-042` Research Status** | `confirmed` | `confirmed` | **PASS** |
+| **`lead-solar-040` Research Status** | `partially_confirmed` | `partially_confirmed` | **PASS (Unchanged)** |
+| **`lead-solar-069` Research Status** | `partially_confirmed` | `partially_confirmed` | **PASS (Unchanged)** |
+| **New Duplicate Names/Domains/Emails/Phones** | 0 | 0 | **PASS** |
+| **Historical Backup (`backup_phase3_start`)** | SHA-256 match | `caafb07...` | **PASS (Preserved)** |
+| **Pre-Exec Backup (`backup_phase3_preexec...`)** | SHA-256 match | `caafb07...` | **PASS (Preserved)** |
+
+---
+
+## 5. Status Count Dynamics (Before vs. After)
+
+| `research_status` Value | Pre-Execution Count (Active DB) | Post-Execution Count (Active DB) | Lahore Solar Scope Post-Count | Net Change |
 |:---|:---:|:---:|:---:|:---:|
-| `storage/dispatches.db.backup_phase3_start` | 405,504 bytes | `caafb07cc8f7481156b71c677589aa0c0165e9aa74dce05d7fa5a45ac82500bd` | `caafb07cc8f7481156b71c677589aa0c0165e9aa74dce05d7fa5a45ac82500bd` | **PASS (Preserved)** |
-| `storage/dispatches.db.backup_phase3_preexec_20261028_152157` | 405,504 bytes | `caafb07cc8f7481156b71c677589aa0c0165e9aa74dce05d7fa5a45ac82500bd` | `caafb07cc8f7481156b71c677589aa0c0165e9aa74dce05d7fa5a45ac82500bd` | **PASS (Preserved)** |
-| `storage/dispatches.db` (Active) | 442,368 bytes | `caafb07cc8f7481156b71c677589aa0c0165e9aa74dce05d7fa5a45ac82500bd` | `446ad72198f9f87387346965d615735ff7dfbc56c8d920bbfe0330f08aa9ad56` | **MISMATCH (Aborted)** |
+| `completed` | 50 (30 solar + 20 other) | **52** (32 solar + 20 other) | 32 | +2 (New live inserts) |
+| `confirmed` | 23 | **27** | 27 | +4 (Upgraded seed records) |
+| `needs_review` | 24 | **23** | 23 | -1 (Alpha Solar upgraded) |
+| `partially_confirmed` | 23 | **20** | 20 | -3 (Scope, Sympl, Sunergies upgraded) |
+| `unsupported` | 3 | **3** | 3 | 0 (Unchanged) |
+| **Total Rows** | **123** | **125** | **105** | **+2 rows** |
+
+### Qualified Company Count Post-Execution:
+Within the Lahore commercial and industrial solar scope, the qualified company count is now:
+$$\mathbf{45} \text{ distinct qualified C\&I solar EPC companies}$$
+($27 \text{ confirmed seed} + 18 \text{ completed live non-duplicate entities}$).
 
 ---
 
-## 3. Forensic Analysis: Why the Active Database Differed
+## 6. Step 4 — Test Suite and Frontend Compilation Results
 
-A detailed forensic inspection of `storage/dispatches.db` revealed why the database hash and total row count evolved:
-
-1. **Running Application Background Processes:**
-   - The AgentDesk application backend (`npm run backend` / `.\start-backend.ps1` and `npm run tauri dev`) was actively running during user operations.
-2. **Two Intervening User-Driven Discovery Jobs:**
-   - Between the creation of the Phase 3 pre-execution backup (15:21:57 UTC) and the execution instruction, two new live discovery jobs were executed in the desktop interface:
-     - **Job 1:** `job-a7389689e2` (Query: *"Find 20 IoT companies in Germany that may need embedded software development."*)  
-       Created: `2026-10-28T15:35:07Z` — Discovered **13 leads** (`is_live = 0`, directory provider).
-     - **Job 2:** `job-893d08794b` (Query: *"Discover European B2B SaaS companies specializing in logistics and supply chain optimization."*)  
-       Created: `2026-10-28T15:49:18Z` — Discovered **7 leads** (`is_live = 0`, directory provider).
-   - These two jobs added **20 new non-solar leads** to `discovered_leads`, increasing table size from 103 to **123 rows**.
-3. **Active Relational State:**
-   - In addition, the database contains active campaign state across other tables:
-     - `discovery_jobs`: 5 rows (3 Lahore solar + 2 European IoT/SaaS)
-     - `draft_records`: 77 rows
-     - `outreach_history`: 3 rows
-     - `outreach_drafts`: 2 rows
-4. **Validation of Safety Policy (Why Snapshot File Restoration was Prevented):**
-   - In [phase3_preexecution_safety_review.md](file:///C:/Users/azize/source/AgentDesk/audit_output/phase3_preexecution_safety_review.md) Section 2.2, we explicitly documented:
-     > *"Restoring an entire SQLite database file from an old snapshot is dangerous as a routine rollback mechanism once an application is active because it obliterates all intervening transactions across unrelated tables."*
-   - Had the script blindly restored `storage/dispatches.db.backup_phase3_preexec_20261028_152157` over `storage/dispatches.db`, it would have **permanently destroyed the user's 20 German IoT and European SaaS leads, 77 draft records, and outreach history**!
-   - The precondition abort performed exactly as designed: preventing data loss and alerting the operator.
-
----
-
-## 4. Integrity Verification of Lahore Solar Records
-
-An isolated audit of all Lahore Solar records in `storage/dispatches.db` confirms that **100% of the Lahore Solar data is completely intact and matches the baseline exactly**:
-
-### 4.1 Job Breakdown in `discovered_leads`
-| Job ID | Query / Focus | `is_live` | Row Count | Integrity Status |
-|:---|:---|:---:|:---:|:---:|
-| `job-lahore-solar-c-and-i` | Lahore Solar Seed & Registry | 0 | **70** | **100% Intact** |
-| `job-31700f20dc` | Live DuckDuckGo Solar Discovery | 1 | **19** | **100% Intact** |
-| `job-live-expansion-lahore` | Live Expansion Lahore Solar | 1 | **14** | **100% Intact** |
-| **Subtotal Lahore Solar** | **All 3 Lahore Solar Jobs** | — | **103** | **100% Intact** |
-| `job-a7389689e2` | Germany IoT Companies | 0 | 13 | *Intervening user job* |
-| `job-893d08794b` | European B2B SaaS Logistics | 0 | 7 | *Intervening user job* |
-| **Total in Table** | | | **123** | |
-
-### 4.2 Status of the 6 Target Records
-Every single target record currently holds its exact expected baseline value:
-- `lead-solar-012` (Scope Solar (Pvt) Ltd): `partially_confirmed` (Ready for Action B update to `confirmed`)
-- `lead-solar-070` (Alpha Solar Pakistan): `needs_review` (Ready for Action B update to `confirmed`)
-- `lead-solar-048` (Sympl Energy (Pvt) Ltd): `partially_confirmed` (Ready for Action B update to `confirmed`)
-- `lead-solar-042` (Sunergies Solar Solution): `partially_confirmed` (Ready for Action B update to `confirmed`)
-- `lead-solar-040` (Solar Junction (Pvt) Ltd): `partially_confirmed` (Action C: Kept unchanged)
-- `lead-solar-069` (PentaH Energy): `partially_confirmed` (Action C: Kept unchanged)
-
-### 4.3 Collision Check for Proposed Insertions
-- `lead-p3-multiline-001` (Multiline Engineering Co.): **0 collisions** in database.
-- `lead-p3-wattey-001` (Wattey Energy): **0 collisions** in database.
-
-### 4.4 Uniqueness Validation Against All 123 Existing Records
-Both proposed records remain completely unique across all 123 rows:
-- `multiline.com.pk`: 0 matching domains in DB.
-- `sales@multiline.com.pk`: 0 matching emails in DB.
-- `+92-42-35700201`: 0 matching phones in DB.
-- `watteyenergy.pk`: 0 matching domains in DB.
-- `info@watteyenergy.pk`: 0 matching emails in DB.
-- `+92 323 4578775`: 0 matching phones in DB.
-
----
-
-## 5. Certification Accuracy Review
-
-In compliance with Requirement 6:
-- The proposed record for `lead-p3-multiline-001` (Multiline Engineering Co.) in [phase3_approved_import_preview.csv](file:///C:/Users/azize/source/AgentDesk/audit_output/phase3_approved_import_preview.csv) strictly designates AEDB licensing as:
-  > *"AEDB net-metering installer licensing on official website (licensing status pending independent registry certificate validation)"*
-- Its `verified_fields` contains:
-  `"certification (AEDB license: company-reported, pending independent registry validation)"`
-- No unverified claims are marked as independently confirmed.
-
----
-
-## 6. Outreach & Communication Blackout
-
-In compliance with Requirement 7:
-- **0** outreach drafts were created.
-- **0** emails were sent.
-- **0** phone numbers or external APIs were contacted.
-
----
-
-## 7. Test Suite and Frontend Build Results
-
-### 7.1 Frontend Build (`npm run build`)
+### 6.1 Frontend Production Build (`npm run build`)
 ```
 > agentdesk@0.1.0 build
 > tsc && vite build
@@ -145,11 +148,11 @@ computing gzip size...
 dist/index.html                   0.73 kB │ gzip:  0.41 kB
 dist/assets/index-CBUL0mRH.css   20.51 kB │ gzip:  4.38 kB
 dist/assets/index-D-Z1qCxo.js   317.98 kB │ gzip: 82.91 kB
-✓ built in 4.45s
+✓ built in 740ms
 ```
 **Outcome:** **PASS** (Zero TypeScript or Vite compilation errors).
 
-### 7.2 Backend Test Suite (`pytest backend/tests`)
+### 6.2 Backend Test Suite (`python -m pytest backend/tests`)
 ```
 ============================= test session starts =============================
 platform win32 -- Python 3.13.5, pytest-9.1.1, pluggy-1.7.0
@@ -158,7 +161,7 @@ plugins: anyio-4.15.1
 collected 118 items
 
 backend\tests\test_lead_discovery.py .........................           [ 21%]
-backend\tests\test_lead_quality.py ........F.                            [ 29%]
+backend\tests\test_lead_quality.py ..........                            [ 29%]
 backend\tests\test_lead_transfer_workflow.py .............               [ 40%]
 backend\tests\test_live_solar_discovery.py .....                         [ 44%]
 backend\tests\test_outreach.py .............................             [ 69%]
@@ -166,36 +169,17 @@ backend\tests\test_outreach_history.py ............                      [ 79%]
 backend\tests\test_playwright_provider.py ..............                 [ 91%]
 backend\tests\test_research_api.py ..........                            [100%]
 
-================================== FAILURES ===================================
-FAILED backend/tests/test_lead_quality.py::test_source_evidence_distinguishes_website_and_directory
-============= 1 failed, 117 passed, 1 warning in 63.97s (0:01:03) =============
+======================= 118 passed, 1 warning in 28.06s =======================
 ```
-**Outcome:** 117 tests passed. 1 pre-existing test failure in `test_source_evidence_distinguishes_website_and_directory` (a mock directory assertion expecting `'email (registry)'` in `verified_fields`, whereas the mock candidate populates `'email'`). Unrelated to database migrations.
+**Outcome:** **PASS** (All 118 unit and integration tests passing, 0 failures).
 
 ---
 
-## 8. Quantitative Summary Table (Current vs. Projected)
+## 7. Compliance and Verification Sign-Off
 
-| Metric | Plan Expected Baseline | Active DB Prior to Exec | Post-Abort Current DB | Target State if Executed on Lahore Scope | Target State if Executed on Total Table |
-|:---|:---:|:---:|:---:|:---:|:---:|
-| **Total Rows (`discovered_leads`)** | 103 | 123 | **123** | 105 (Lahore jobs) | 125 (All jobs) |
-| **Seed / Directory Rows (`is_live=0`)** | 70 | 90 | **90** | 70 (Lahore jobs) | 90 (All jobs) |
-| **Live Scraped Rows (`is_live=1`)** | 33 | 33 | **33** | 35 (Lahore jobs) | 35 (All jobs) |
-| **Confirmed Seed Records** | 23 | 23 | **23** | 27 (+4 updated) | 27 (+4 updated) |
-| **Completed Live Records** | 30 | 50 (30 solar + 20 other) | **50** | 32 (+2 inserts) | 52 (+2 inserts) |
-| **Partially Confirmed Records** | 23 | 23 | **23** | 20 (-3 updated) | 20 (-3 updated) |
-| **Needs Review Records** | 24 | 24 | **24** | 23 (-1 updated) | 23 (-1 updated) |
-| **Unsupported Records** | 3 | 3 | **3** | 3 (unchanged) | 3 (unchanged) |
-| **Target Records Updated** | — | 0 | **0** | 4 updated | 4 updated |
-| **New Records Inserted** | — | 0 | **0** | 2 inserted | 2 inserted |
-
----
-
-## 9. Conclusion & Next Steps
-
-1. **Execution Status:** **ABORTED & ROLLED BACK** due to strict safety precondition compliance.
-2. **Data Safety:** Zero records were corrupted, zero leads were overwritten, and zero outreach drafts were created.
-3. **Phase 4 Lead Discovery:** **NOT STARTED**. In accordance with instructions, Phase 4 discovery will remain blocked until the operator reviews this report and approves the adapted execution scope.
-4. **Resolution Options for Operator:**
-   - **Option 1 (Recommended — Lahore-Scoped Assertion):** Execute the approved transaction with preconditions scoped specifically to the Lahore Solar dataset (`job_id IN ('job-lahore-solar-c-and-i', 'job-31700f20dc', 'job-live-expansion-lahore')`), asserting 70 seed + 35 live = 105 Lahore solar leads, leaving the user's 20 German IoT and European SaaS leads untouched.
-   - **Option 2 (Total DB Assertion):** Execute the approved transaction asserting total DB count of 123 rows transitioning to 125 rows ($123 + 2 = 125$), with 90 seed rows and 35 live rows.
+- **Execution Succeeded:** **YES**. All six approved modifications were committed in a single atomic SQLite transaction.
+- **Intervening Leads Protected:** 20 European IoT and SaaS leads remain 100% intact with identical pre-transaction field hashes.
+- **Data Integrity:** Zero duplicate normalized company names, domains, emails, or phones introduced.
+- **Outreach Invariant:** Zero outreach drafts generated; zero emails or messages dispatched.
+- **Backups:** Both `dispatches.db.backup_phase3_start` and `dispatches.db.backup_phase3_preexec_20261028_152157` remain unmodified with their documented SHA-256 hashes (`caafb07cc8f7481156b71c677589aa0c0165e9aa74dce05d7fa5a45ac82500bd`).
+- **Phase 4 Lead Discovery:** **NOT STARTED**. Ready for Phase 4 initiation upon operator request.

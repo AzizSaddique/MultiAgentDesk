@@ -5,7 +5,8 @@ import sqlite3
 import asyncio
 from datetime import datetime, timezone
 import uvicorn
-from fastapi import FastAPI, HTTPException, Response
+from fastapi import FastAPI, HTTPException, Response, Request, status, Depends
+from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from typing import List, Optional, Dict, Any
 
@@ -41,6 +42,7 @@ try:
     from .exporter import generate_leads_csv
     from .env_loader import load_root_env
     from .dispatch_tracker import global_dispatch_tracker
+    from .security.auth import get_session_token, verify_token_value, require_session_token
 except (ImportError, ValueError):
     from models import (
         ResearchRequest, ResearchResponse, CSVExportRequest,
@@ -65,6 +67,7 @@ except (ImportError, ValueError):
     from exporter import generate_leads_csv
     from env_loader import load_root_env
     from dispatch_tracker import global_dispatch_tracker
+    from security.auth import get_session_token, verify_token_value, require_session_token
 
 # Load root .env into environment if present
 load_root_env(override=False)
@@ -152,6 +155,51 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Initialize local session authentication token
+_active_token = get_session_token()
+
+# Security: Enforce Bearer session token authentication across all API endpoints
+@app.middleware("http")
+async def enforce_bearer_auth(request: Request, call_next):
+    # Allow CORS preflight requests
+    if request.method == "OPTIONS":
+        return await call_next(request)
+
+    # Public health check endpoint
+    if request.url.path == "/health":
+        return await call_next(request)
+
+    # Public OpenAPI documentation endpoints
+    if request.url.path in ("/docs", "/redoc", "/openapi.json"):
+        return await call_next(request)
+
+    # All other endpoints require Bearer token authentication
+    auth_header = request.headers.get("Authorization")
+    if not auth_header:
+        return JSONResponse(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            content={"detail": "Unauthorized: Missing local session authentication token in Authorization header."},
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    parts = auth_header.split()
+    if len(parts) != 2 or parts[0].lower() != "bearer":
+        return JSONResponse(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            content={"detail": "Unauthorized: Invalid authentication scheme, Bearer required."},
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    token = parts[1]
+    if not verify_token_value(token):
+        return JSONResponse(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            content={"detail": "Unauthorized: Invalid local session authentication token."},
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    return await call_next(request)
 
 # Providers
 mock_provider = MockResearchProvider()

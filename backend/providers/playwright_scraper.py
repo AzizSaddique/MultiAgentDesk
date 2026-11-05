@@ -17,9 +17,25 @@ from bs4 import BeautifulSoup
 try:
     from .base import BaseResearchProvider
     from ..models import ResearchRequest, LeadRecord, CrawlDiagnostic
+    from ..security.url_validator import (
+        validate_target_url,
+        validate_outbound_url,
+        is_prohibited_ip,
+        safe_fetch_get,
+        SSRFSecurityError,
+        SSRFRedirectError,
+    )
 except (ImportError, ValueError):
     from providers.base import BaseResearchProvider
     from models import ResearchRequest, LeadRecord, CrawlDiagnostic
+    from security.url_validator import (
+        validate_target_url,
+        validate_outbound_url,
+        is_prohibited_ip,
+        safe_fetch_get,
+        SSRFSecurityError,
+        SSRFRedirectError,
+    )
 
 USER_AGENT = "AgentDesk-Bot/1.0 (+https://agentdesk.local/bot; ethical-public-researcher)"
 
@@ -27,46 +43,14 @@ def _sanitize_slug(text: str) -> str:
     cleaned = re.sub(r'[^a-zA-Z0-9]+', '', text.lower())
     return cleaned[:16] if cleaned else "web"
 
-def validate_target_url(raw_url: str) -> Tuple[bool, str, str]:
-    """
-    Validates user-supplied URL. Only HTTP and HTTPS are permitted.
-    Internal and loopback addresses are blocked.
-    Returns (is_valid, sanitized_url, error_reason).
-    """
-    if not raw_url or not raw_url.strip():
-        return False, "", "URL is empty"
-    
-    cleaned = raw_url.strip()
-    if not (cleaned.startswith("http://") or cleaned.startswith("https://")):
-        if re.match(r'^[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}', cleaned):
-            cleaned = "https://" + cleaned
-        else:
-            return False, raw_url, "URL must use HTTP or HTTPS protocol."
-            
-    parsed = urlparse(cleaned)
-    if parsed.scheme not in ("http", "https"):
-        return False, cleaned, f"Protocol '{parsed.scheme}' not allowed. Only HTTP and HTTPS are permitted."
-        
-    hostname = parsed.hostname
-    if not hostname:
-        return False, cleaned, "URL lacks a valid hostname."
-
-    # Guard against SSRF / local network access
-    if (
-        hostname in ("localhost", "127.0.0.1", "0.0.0.0")
-        or hostname.startswith("192.168.")
-        or hostname.startswith("10.")
-        or hostname.startswith("172.16.")
-    ):
-        return False, cleaned, "Internal / private network URLs are restricted."
-
-    return True, cleaned, ""
-
 def is_allowed_by_robots(target_url: str, user_agent: str = USER_AGENT, timeout: float = 3.0) -> Tuple[bool, str]:
     """
     Checks robots.txt for the domain of the target URL.
     Returns (is_allowed, reason).
     """
+    is_valid, sanitized, reason = validate_target_url(target_url)
+    if not is_valid:
+        return False, f"Target URL failed safety validation: {reason}"
     try:
         parsed = urlparse(target_url)
         robots_url = f"{parsed.scheme}://{parsed.netloc}/robots.txt"
@@ -420,6 +404,24 @@ class PlaywrightResearchProvider(BaseResearchProvider):
 
                         # 2. Navigate to Target URL via Playwright
                         page = await context.new_page()
+                        async def _safe_route_filter(route):
+                            try:
+                                req_url = route.request.url
+                                is_valid, _, _ = validate_target_url(req_url)
+                                if not is_valid:
+                                    await route.abort("blockedbyclient")
+                                else:
+                                    await route.continue_()
+                            except Exception:
+                                try:
+                                    await route.abort("blockedbyclient")
+                                except Exception:
+                                    pass
+
+                        try:
+                            await page.route("**/*", _safe_route_filter)
+                        except Exception:
+                            pass
                         primary_lead: Optional[LeadRecord] = None
                         subpage_links: List[str] = []
 
@@ -509,6 +511,10 @@ class PlaywrightResearchProvider(BaseResearchProvider):
 
                                 sub_page = await context.new_page()
                                 try:
+                                    try:
+                                        await sub_page.route("**/*", _safe_route_filter)
+                                    except Exception:
+                                        pass
                                     # Polite crawl rate limit delay
                                     await asyncio.sleep(0.4)
                                     sub_resp = await sub_page.goto(sub_url, timeout=9000, wait_until="domcontentloaded")

@@ -31,6 +31,78 @@ export interface HealthResponse {
 
 export const BACKEND_BASE_URL = 'http://127.0.0.1:8000';
 
+let cachedSessionToken: string | null = null;
+
+/**
+ * Retrieves the local FastAPI session authentication token.
+ * 1. Checks memory cache.
+ * 2. Attempts Tauri v2 IPC command `get_session_token`.
+ * 3. In Vite dev mode, queries the dev middleware endpoint `/__agentdesk_auth_token`.
+ * 4. Checks window.__AGENTDESK_TOKEN__ fallback.
+ */
+export async function getSessionToken(): Promise<string | null> {
+  if (cachedSessionToken) {
+    return cachedSessionToken;
+  }
+
+  // 1. Try Tauri v2 IPC command
+  try {
+    const { invoke } = await import('@tauri-apps/api/core');
+    const token = await invoke<string>('get_session_token');
+    if (token && typeof token === 'string' && token.trim().length > 0) {
+      cachedSessionToken = token.trim();
+      return cachedSessionToken;
+    }
+  } catch {
+    // Non-Tauri environment or command unavailable
+  }
+
+  // 2. Try Vite dev server middleware
+  try {
+    const res = await fetch('/__agentdesk_auth_token');
+    if (res.ok) {
+      const data = await res.json();
+      if (data?.token && typeof data.token === 'string' && data.token.trim().length > 0) {
+        cachedSessionToken = data.token.trim();
+        return cachedSessionToken;
+      }
+    }
+  } catch {
+    // Vite dev server token endpoint unavailable
+  }
+
+  // 3. Injected global fallback
+  if (typeof window !== 'undefined' && (window as unknown as { __AGENTDESK_TOKEN__?: string }).__AGENTDESK_TOKEN__) {
+    cachedSessionToken = (window as unknown as { __AGENTDESK_TOKEN__?: string }).__AGENTDESK_TOKEN__ || null;
+    return cachedSessionToken;
+  }
+
+  return null;
+}
+
+/**
+ * Manually sets or resets the local session authentication token (useful for tests and initialization).
+ */
+export function setSessionToken(token: string | null): void {
+  cachedSessionToken = token;
+}
+
+/**
+ * Authenticated fetch helper for backend API requests.
+ * Automatically injects the Authorization: Bearer <token> header.
+ */
+export async function authFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
+  const token = await getSessionToken();
+  const headers = new Headers(init?.headers || {});
+  if (token && !headers.has('Authorization')) {
+    headers.set('Authorization', `Bearer ${token}`);
+  }
+  return fetch(input, {
+    ...init,
+    headers,
+  });
+}
+
 export async function fetchHealth(timeoutMs: number = 2500): Promise<HealthResponse> {
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
@@ -63,7 +135,7 @@ export async function searchLeads(request: ResearchRequest, timeoutMs: number = 
   const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
 
   try {
-    const response = await fetch(`${BACKEND_BASE_URL}/api/research/leads`, {
+    const response = await authFetch(`${BACKEND_BASE_URL}/api/research/leads`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -114,7 +186,7 @@ export async function downloadLeadsCsv(leads: LeadRecord[]): Promise<void> {
   let csvContent = '';
 
   try {
-    const response = await fetch(`${BACKEND_BASE_URL}/api/research/export-csv`, {
+    const response = await authFetch(`${BACKEND_BASE_URL}/api/research/export-csv`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -181,7 +253,7 @@ export async function downloadLeadsCsv(leads: LeadRecord[]): Promise<void> {
  */
 export async function fetchAIProviders(): Promise<ProvidersResponse> {
   try {
-    const response = await fetch(`${BACKEND_BASE_URL}/api/outreach/providers`, {
+    const response = await authFetch(`${BACKEND_BASE_URL}/api/outreach/providers`, {
       method: 'GET',
       headers: {
         'Accept': 'application/json',
@@ -226,7 +298,7 @@ export async function draftOutreach(
   const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
 
   try {
-    const response = await fetch(`${BACKEND_BASE_URL}/api/outreach/draft`, {
+    const response = await authFetch(`${BACKEND_BASE_URL}/api/outreach/draft`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -267,7 +339,7 @@ export async function draftOutreach(
  * Requires approved === true and a genuine verified recipient email.
  */
 export async function sendOutreach(request: SendOutreachRequest): Promise<SendOutreachResponse> {
-  const response = await fetch(`${BACKEND_BASE_URL}/api/outreach/send`, {
+  const response = await authFetch(`${BACKEND_BASE_URL}/api/outreach/send`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -314,7 +386,7 @@ export async function fetchOutreachHistory(
   const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
 
   try {
-    const response = await fetch(`${BACKEND_BASE_URL}/api/outreach/history${queryString}`, {
+    const response = await authFetch(`${BACKEND_BASE_URL}/api/outreach/history${queryString}`, {
       method: 'GET',
       headers: {
         'Accept': 'application/json',
@@ -356,7 +428,7 @@ export async function downloadHistoryCsv(params: HistoryFilterParams = {}): Prom
 
   const queryString = queryParts.length > 0 ? `?${queryParts.join('&')}` : '';
 
-  const response = await fetch(`${BACKEND_BASE_URL}/api/outreach/history/export-csv${queryString}`, {
+  const response = await authFetch(`${BACKEND_BASE_URL}/api/outreach/history/export-csv${queryString}`, {
     method: 'GET',
     headers: {
       'Accept': 'text/csv',
@@ -393,7 +465,7 @@ export async function generateDiscoveryPlan(
   prompt: string,
   aiConfig?: AIProviderConfig
 ): Promise<DiscoveryPlan> {
-  const response = await fetch(`${BACKEND_BASE_URL}/api/discovery/plan`, {
+  const response = await authFetch(`${BACKEND_BASE_URL}/api/discovery/plan`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -420,7 +492,7 @@ export async function generateDiscoveryPlan(
  * Fetches availability and configuration status of supported search sources.
  */
 export async function fetchSearchProviders(): Promise<SearchProvidersResponse> {
-  const response = await fetch(`${BACKEND_BASE_URL}/api/discovery/providers`, {
+  const response = await authFetch(`${BACKEND_BASE_URL}/api/discovery/providers`, {
     method: 'GET',
     headers: {
       'Accept': 'application/json',
@@ -442,7 +514,7 @@ export async function createDiscoveryJob(
   searchProvider: string = 'auto',
   aiConfig?: AIProviderConfig
 ): Promise<DiscoveryJob> {
-  const response = await fetch(`${BACKEND_BASE_URL}/api/discovery/jobs`, {
+  const response = await authFetch(`${BACKEND_BASE_URL}/api/discovery/jobs`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -473,7 +545,7 @@ export async function createDiscoveryJob(
  * Retrieves the current status, progress telemetry, and recent leads of a discovery job.
  */
 export async function fetchDiscoveryJob(jobId: string): Promise<DiscoveryJobResponse> {
-  const response = await fetch(`${BACKEND_BASE_URL}/api/discovery/jobs/${encodeURIComponent(jobId)}`, {
+  const response = await authFetch(`${BACKEND_BASE_URL}/api/discovery/jobs/${encodeURIComponent(jobId)}`, {
     method: 'GET',
     headers: {
       'Accept': 'application/json',
@@ -491,7 +563,7 @@ export async function fetchDiscoveryJob(jobId: string): Promise<DiscoveryJobResp
  * Cooperatively cancels a running discovery job.
  */
 export async function cancelDiscoveryJob(jobId: string): Promise<DiscoveryJob> {
-  const response = await fetch(`${BACKEND_BASE_URL}/api/discovery/jobs/${encodeURIComponent(jobId)}/cancel`, {
+  const response = await authFetch(`${BACKEND_BASE_URL}/api/discovery/jobs/${encodeURIComponent(jobId)}/cancel`, {
     method: 'POST',
     headers: {
       'Accept': 'application/json',
@@ -535,7 +607,7 @@ export async function fetchDiscoveredLeads(
 
   const queryString = queryParts.length > 0 ? `?${queryParts.join('&')}` : '';
 
-  const response = await fetch(
+  const response = await authFetch(
     `${BACKEND_BASE_URL}/api/discovery/jobs/${encodeURIComponent(jobId)}/leads${queryString}`,
     {
       method: 'GET',
@@ -566,7 +638,7 @@ export async function downloadDiscoveredLeadsCsv(
 
   const queryString = queryParts.length > 0 ? `?${queryParts.join('&')}` : '';
 
-  const response = await fetch(
+  const response = await authFetch(
     `${BACKEND_BASE_URL}/api/discovery/jobs/${encodeURIComponent(jobId)}/export-csv${queryString}`,
     {
       method: 'GET',
@@ -608,7 +680,7 @@ export async function transferLeadsToOutreach(
     preventDuplicates?: boolean;
   }
 ): Promise<LeadTransferResponse> {
-  const response = await fetch(`${BACKEND_BASE_URL}/api/discovery/transfer-outreach`, {
+  const response = await authFetch(`${BACKEND_BASE_URL}/api/discovery/transfer-outreach`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -654,7 +726,7 @@ export async function fetchOutreachDrafts(
   if (search && search.trim()) queryParts.push(`search=${encodeURIComponent(search.trim())}`);
 
   const queryString = `?${queryParts.join('&')}`;
-  const response = await fetch(`${BACKEND_BASE_URL}/api/outreach/drafts${queryString}`, {
+  const response = await authFetch(`${BACKEND_BASE_URL}/api/outreach/drafts${queryString}`, {
     method: 'GET',
     headers: {
       'Accept': 'application/json',
@@ -672,7 +744,7 @@ export async function fetchOutreachDrafts(
  * Fetches a single outreach draft by ID.
  */
 export async function fetchOutreachDraft(draftId: string): Promise<OutreachDraft> {
-  const response = await fetch(`${BACKEND_BASE_URL}/api/outreach/drafts/${encodeURIComponent(draftId)}`, {
+  const response = await authFetch(`${BACKEND_BASE_URL}/api/outreach/drafts/${encodeURIComponent(draftId)}`, {
     method: 'GET',
     headers: {
       'Accept': 'application/json',
@@ -693,7 +765,7 @@ export async function updateOutreachDraft(
   draftId: string,
   updates: UpdateDraftRequest
 ): Promise<OutreachDraft> {
-  const response = await fetch(`${BACKEND_BASE_URL}/api/outreach/drafts/${encodeURIComponent(draftId)}`, {
+  const response = await authFetch(`${BACKEND_BASE_URL}/api/outreach/drafts/${encodeURIComponent(draftId)}`, {
     method: 'PUT',
     headers: {
       'Content-Type': 'application/json',
@@ -720,7 +792,7 @@ export async function updateOutreachDraft(
  * Explicitly approves an outreach draft for human-controlled dispatch.
  */
 export async function approveOutreachDraft(draftId: string): Promise<OutreachDraft> {
-  const response = await fetch(`${BACKEND_BASE_URL}/api/outreach/drafts/${encodeURIComponent(draftId)}/approve`, {
+  const response = await authFetch(`${BACKEND_BASE_URL}/api/outreach/drafts/${encodeURIComponent(draftId)}/approve`, {
     method: 'POST',
     headers: {
       'Accept': 'application/json',
@@ -745,7 +817,7 @@ export async function approveOutreachDraft(draftId: string): Promise<OutreachDra
  * Reverts approval status of a draft back to 'drafted'.
  */
 export async function unapproveOutreachDraft(draftId: string): Promise<OutreachDraft> {
-  const response = await fetch(`${BACKEND_BASE_URL}/api/outreach/drafts/${encodeURIComponent(draftId)}/unapprove`, {
+  const response = await authFetch(`${BACKEND_BASE_URL}/api/outreach/drafts/${encodeURIComponent(draftId)}/unapprove`, {
     method: 'POST',
     headers: {
       'Accept': 'application/json',
@@ -773,7 +845,7 @@ export async function discardOutreachDraft(
   draftId: string,
   reason?: string
 ): Promise<OutreachDraft> {
-  const response = await fetch(`${BACKEND_BASE_URL}/api/outreach/drafts/${encodeURIComponent(draftId)}/discard`, {
+  const response = await authFetch(`${BACKEND_BASE_URL}/api/outreach/drafts/${encodeURIComponent(draftId)}/discard`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -800,7 +872,7 @@ export async function discardOutreachDraft(
  * Deletes an outreach draft.
  */
 export async function deleteOutreachDraft(draftId: string): Promise<{ deleted: boolean; draft_id: string }> {
-  const response = await fetch(`${BACKEND_BASE_URL}/api/outreach/drafts/${encodeURIComponent(draftId)}`, {
+  const response = await authFetch(`${BACKEND_BASE_URL}/api/outreach/drafts/${encodeURIComponent(draftId)}`, {
     method: 'DELETE',
     headers: {
       'Accept': 'application/json',

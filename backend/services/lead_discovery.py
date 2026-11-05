@@ -14,10 +14,13 @@ import re
 import json
 import uuid
 import asyncio
+import logging
 from datetime import datetime, timezone
 from typing import List, Dict, Optional, Tuple, Set, Any
 from urllib.parse import urlparse, urljoin
 from bs4 import BeautifulSoup
+
+logger = logging.getLogger(__name__)
 
 try:
     from ..models import (
@@ -31,6 +34,7 @@ try:
         validate_target_url, is_allowed_by_robots, _clean_extracted_emails,
         PlaywrightResearchProvider, USER_AGENT
     )
+    from ..security.url_validator import safe_fetch_get, validate_outbound_url, SSRFSecurityError
     from ..providers.llm import _has_genuine_email, get_llm_provider
     from ..providers.email_dispatcher import sanitize_log_message
     from ..dispatch_tracker import global_dispatch_tracker
@@ -46,6 +50,7 @@ except (ImportError, ValueError):
         validate_target_url, is_allowed_by_robots, _clean_extracted_emails,
         PlaywrightResearchProvider, USER_AGENT
     )
+    from security.url_validator import safe_fetch_get, validate_outbound_url, SSRFSecurityError
     from providers.llm import _has_genuine_email, get_llm_provider
     from providers.email_dispatcher import sanitize_log_message
     from dispatch_tracker import global_dispatch_tracker
@@ -952,23 +957,20 @@ class LeadDiscoveryService:
         # If live HTML inspection is feasible
         html_content = ""
         try:
-            import httpx
-            async with httpx.AsyncClient(
+            resp = await safe_fetch_get(
+                sanitized_url,
                 headers={"User-Agent": USER_AGENT},
-                follow_redirects=True,
                 timeout=6.0,
-            ) as client:
-                resp = await client.get(sanitized_url)
-                if resp.status_code == 200:
-                    html_content = resp.text
-                    # SSRF check on final redirected URL
-                    redirected_url = str(resp.url)
-                    valid_red, sanitized_red, _ = validate_target_url(redirected_url)
-                    if not valid_red:
-                        return None, "skipped"
-                    sanitized_url = sanitized_red
-        except Exception:
-            pass
+                max_redirects=5,
+            )
+            if resp.status_code == 200:
+                html_content = resp.text
+                sanitized_url = str(resp.request.url if hasattr(resp, "request") else resp.url)
+        except SSRFSecurityError as ssrf_err:
+            logger.warning(f"SSRF violation blocked during candidate inspection '{sanitized_url}': {ssrf_err}")
+            return None, "skipped"
+        except Exception as fetch_err:
+            logger.debug(f"Direct HTML fetch skipped or failed for {sanitized_url}: {fetch_err}")
 
         # If HTML content was obtained, extract verified facts
         if html_content:
@@ -1007,28 +1009,31 @@ class LeadDiscoveryService:
                 v_sub, s_sub, _ = validate_target_url(sub_url)
                 if v_sub and is_allowed_by_robots(s_sub)[0]:
                     try:
-                        async with httpx.AsyncClient(
+                        sub_resp = await safe_fetch_get(
+                            s_sub,
                             headers={"User-Agent": USER_AGENT},
-                            follow_redirects=True,
                             timeout=5.0,
-                        ) as client:
-                            sub_resp = await client.get(s_sub)
-                            if sub_resp.status_code == 200:
-                                _, _, sub_emails, sub_phones, _ = self._extract_from_html(
-                                    html=sub_resp.text,
-                                    base_url=s_sub,
-                                )
-                                if sub_emails:
-                                    found_email = sub_emails[0]
-                                    verified_fields.append("email (contact page)")
-                                    source_urls.append(s_sub)
-                                if sub_phones and not found_phone:
-                                    found_phone = sub_phones[0]
-                                    verified_fields.append("phone (contact page)")
-                                    if s_sub not in source_urls:
-                                        source_urls.append(s_sub)
-                    except Exception:
-                        pass
+                            max_redirects=3,
+                        )
+                        if sub_resp.status_code == 200:
+                            final_sub_url = str(sub_resp.request.url if hasattr(sub_resp, "request") else sub_resp.url)
+                            _, _, sub_emails, sub_phones, _ = self._extract_from_html(
+                                html=sub_resp.text,
+                                base_url=final_sub_url,
+                            )
+                            if sub_emails:
+                                found_email = sub_emails[0]
+                                verified_fields.append("email (contact page)")
+                                source_urls.append(final_sub_url)
+                            if sub_phones and not found_phone:
+                                found_phone = sub_phones[0]
+                                verified_fields.append("phone (contact page)")
+                                if final_sub_url not in source_urls:
+                                    source_urls.append(final_sub_url)
+                    except SSRFSecurityError as ssrf_err:
+                        logger.warning(f"SSRF violation on subpage '{s_sub}': {ssrf_err}")
+                    except Exception as sub_err:
+                        logger.debug(f"Subpage fetch failed for '{s_sub}': {sub_err}")
         elif direct_facts:
             # Verified directory entry fallback
             verified_fields.extend(["company_name (registry)", "website (verified)"])

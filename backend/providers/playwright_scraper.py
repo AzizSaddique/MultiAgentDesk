@@ -371,7 +371,7 @@ class PlaywrightResearchProvider(BaseResearchProvider):
                 try:
                     browser = await p.chromium.launch(
                         headless=True,
-                        args=["--disable-gpu", "--no-sandbox", "--disable-dev-shm-usage"]
+                        args=["--disable-gpu", "--no-sandbox", "--disable-dev-shm-usage", "--disable-webrtc"]
                     )
                     context = await browser.new_context(
                         user_agent=USER_AGENT,
@@ -403,11 +403,24 @@ class PlaywrightResearchProvider(BaseResearchProvider):
                             continue
 
                         # 2. Navigate to Target URL via Playwright
+                        # Verify target URL destination before page allocation
+                        is_safe_target, _, ssrf_reason = validate_outbound_url(target_url)
+                        if not is_safe_target:
+                            self._diagnostics.append(
+                                CrawlDiagnostic(
+                                    url=target_url,
+                                    status="ssrf_blocked",
+                                    reason=f"Target URL blocked by SSRF policy: {ssrf_reason}"
+                                )
+                            )
+                            continue
+
                         page = await context.new_page()
                         async def _safe_route_filter(route):
                             try:
                                 req_url = route.request.url
-                                is_valid, _, _ = validate_target_url(req_url)
+                                # Enforce full SSRF validation: format, ports, alternate IPs, and DNS pre-resolution
+                                is_valid, _, _ = validate_outbound_url(req_url)
                                 if not is_valid:
                                     await route.abort("blockedbyclient")
                                 else:
@@ -497,6 +510,18 @@ class PlaywrightResearchProvider(BaseResearchProvider):
                         if primary_lead and request.follow_links and primary_lead.email == "(No public email listed)":
                             max_subpages = min(request.max_pages_per_domain or 2, len(subpage_links), 2)
                             for sub_url in subpage_links[:max_subpages]:
+                                # Check SSRF safety for subpage
+                                is_safe_sub, _, sub_reason = validate_outbound_url(sub_url)
+                                if not is_safe_sub:
+                                    self._diagnostics.append(
+                                        CrawlDiagnostic(
+                                            url=sub_url,
+                                            status="ssrf_blocked",
+                                            reason=f"Subpage blocked by SSRF policy: {sub_reason}"
+                                        )
+                                    )
+                                    continue
+
                                 # Check robots.txt for subpage
                                 sub_allowed, robots_sub_reason = is_allowed_by_robots(sub_url)
                                 if not sub_allowed:

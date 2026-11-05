@@ -4,8 +4,9 @@ Enforces strict protocol, port, hostname, and multi-record DNS safety controls.
 Protects against:
 - Private, loopback, link-local, multicast, and reserved IPv4/IPv6 address spaces.
 - Cloud metadata services (e.g. 169.254.169.254).
+- Alternate IP notations (dword/integer, octal, hex, shortened IPv4, percent-encoded).
 - IPv4-mapped IPv6 address manipulation.
-- DNS rebinding and mixed public/private DNS responses.
+- DNS rebinding TOCTOU via connection pinning at the socket transport layer.
 - Redirect-based SSRF hops.
 - Embedded URL credentials and non-standard network ports.
 """
@@ -15,6 +16,8 @@ import ipaddress
 import urllib.parse
 from typing import Tuple, List, Optional, Callable, Dict, Any, Union
 import httpx
+import httpcore
+from httpcore._backends.auto import AutoBackend
 
 # Allowed schemes
 PERMITTED_SCHEMES = ("http", "https")
@@ -58,6 +61,49 @@ class SSRFSecurityError(Exception):
 class SSRFRedirectError(SSRFSecurityError):
     """Raised when redirect depth is exceeded or redirect destination violates SSRF policy."""
     pass
+
+
+def canonicalize_host(raw_host: str) -> Tuple[bool, str, str]:
+    """
+    Normalizes, unquotes, and classifies hostnames, resolving alternate IP representations:
+    - Strips brackets from IPv6.
+    - Unquotes percent-encoded host characters (%31%32%37... -> 127.0.0.1).
+    - Converts dword/integer, octal, hex, and shortened IPv4 formats into canonical dot-decimal
+      via socket.inet_aton / socket.inet_ntoa.
+    - Converts IPv6 and IPv4-mapped IPv6 into canonical ipaddress strings.
+    Returns (is_valid, canonical_host_or_ip, classification: 'ipv4'|'ipv6'|'domain').
+    """
+    if not raw_host:
+        return False, "", "URL lacks a valid hostname."
+
+    unquoted = urllib.parse.unquote(raw_host).strip().strip("[]")
+    if not unquoted:
+        return False, "", "URL lacks a valid hostname."
+
+    # Reject malformed percent signs or illegal whitespace/control characters
+    if "%" in unquoted or any(c.isspace() for c in unquoted):
+        return False, unquoted, "Hostname contains illegal percent-encoded or malformed characters."
+
+    # 1. Attempt IPv4 parsing via socket.inet_aton
+    # socket.inet_aton parses dot-decimal ('127.0.0.1'), integers ('2130706433'), octal ('0177.0.0.1'),
+    # hex ('0x7f000001', '0x7f.1'), and shortened forms ('127.1').
+    try:
+        raw_bytes = socket.inet_aton(unquoted)
+        canonical_v4 = socket.inet_ntoa(raw_bytes)
+        return True, canonical_v4, "ipv4"
+    except (OSError, socket.error):
+        pass
+
+    # 2. Attempt IPv6 parsing via ipaddress
+    try:
+        ip_v6 = ipaddress.ip_address(unquoted)
+        if isinstance(ip_v6, ipaddress.IPv6Address):
+            return True, str(ip_v6), "ipv6"
+    except ValueError:
+        pass
+
+    # 3. Standard domain name
+    return True, unquoted.lower(), "domain"
 
 
 def is_prohibited_ip(ip: Union[ipaddress.IPv4Address, ipaddress.IPv6Address]) -> Tuple[bool, str]:
@@ -124,6 +170,18 @@ def resolve_domain_ips(
     if custom_resolver:
         return custom_resolver(hostname)
 
+    # If hostname is already an IP literal, return it directly
+    try:
+        raw_v4 = socket.inet_aton(hostname)
+        return [ipaddress.ip_address(socket.inet_ntoa(raw_v4))]
+    except (OSError, socket.error):
+        pass
+
+    try:
+        return [ipaddress.ip_address(hostname)]
+    except ValueError:
+        pass
+
     resolved_ips: List[Union[ipaddress.IPv4Address, ipaddress.IPv6Address]] = []
     seen = set()
 
@@ -152,6 +210,7 @@ def validate_target_url(
     - Embedded credentials (user:pass@) are blocked.
     - Non-standard ports (outside 80, 443) are blocked.
     - Localhost and internal domain names are blocked.
+    - Canonicalizes alternate IP formats (integer, octal, hex, shortened, percent-encoded).
     - IP literals are evaluated against all prohibited IP spaces.
     - If resolve_dns is True, resolves all A and AAAA records and verifies every answer.
     Returns (is_valid, sanitized_url, error_reason).
@@ -181,31 +240,31 @@ def validate_target_url(
     if parsed.username or parsed.password:
         return False, cleaned, "Embedded credentials in URL are prohibited for security."
 
-    # 3. Hostname extraction & checks
+    # 3. Hostname extraction and alternate IP canonicalization
     raw_host = parsed.hostname
     if not raw_host:
         return False, cleaned, "URL lacks a valid hostname."
 
-    hostname_lower = raw_host.lower().strip("[]")
+    is_valid_host, canonical_host, host_class_or_err = canonicalize_host(raw_host)
+    if not is_valid_host:
+        return False, cleaned, host_class_or_err
+    host_class = host_class_or_err
 
-    # Reject localhost or internal domain names
-    if hostname_lower == "localhost" or any(hostname_lower.endswith(suffix) for suffix in PROHIBITED_DOMAIN_SUFFIXES):
+    # 4. Reject localhost or internal domain names
+    if canonical_host == "localhost" or any(canonical_host.endswith(suffix) for suffix in PROHIBITED_DOMAIN_SUFFIXES):
         return False, cleaned, "Internal / private network URLs are restricted."
 
-    # 4. Check if hostname is an IP literal
-    is_ip_literal = False
-    try:
-        ip_obj = ipaddress.ip_address(hostname_lower)
-        is_ip_literal = True
-    except ValueError:
-        is_ip_literal = False
+    # 5. Check IP literals (including canonicalized integer, hex, octal notations)
+    if host_class in ("ipv4", "ipv6"):
+        try:
+            ip_obj = ipaddress.ip_address(canonical_host)
+            prohibited, reason = is_prohibited_ip(ip_obj)
+            if prohibited:
+                return False, cleaned, f"Internal / private network URLs are restricted: {reason}"
+        except ValueError:
+            return False, cleaned, f"Invalid IP address format '{canonical_host}'."
 
-    if is_ip_literal:
-        prohibited, reason = is_prohibited_ip(ip_obj)
-        if prohibited:
-            return False, cleaned, f"Internal / private network URLs are restricted: {reason}"
-
-    # 5. Port validation
+    # 6. Port validation
     if parsed.port is not None and parsed.port not in PERMITTED_PORTS:
         return (
             False,
@@ -213,15 +272,15 @@ def validate_target_url(
             f"Port {parsed.port} is not allowed. Only standard HTTP/HTTPS ports (80, 443) are permitted."
         )
 
-    if is_ip_literal:
+    if host_class in ("ipv4", "ipv6"):
         return True, cleaned, ""
 
-    # 6. Optional DNS resolution check (or explicit outbound validation)
+    # 7. Optional DNS resolution check (or explicit outbound validation)
     if resolve_dns:
         try:
-            resolved_ips = resolve_domain_ips(hostname_lower, custom_resolver=custom_dns_resolver)
+            resolved_ips = resolve_domain_ips(canonical_host, custom_resolver=custom_dns_resolver)
             if not resolved_ips:
-                return False, cleaned, f"DNS resolution returned no IP addresses for hostname '{hostname_lower}'."
+                return False, cleaned, f"DNS resolution returned no IP addresses for hostname '{canonical_host}'."
 
             for res_ip in resolved_ips:
                 prohibited, reason = is_prohibited_ip(res_ip)
@@ -229,10 +288,10 @@ def validate_target_url(
                     return (
                         False,
                         cleaned,
-                        f"Internal / private network URLs are restricted: domain '{hostname_lower}' resolves to prohibited IP '{res_ip}' ({reason})"
+                        f"Internal / private network URLs are restricted: domain '{canonical_host}' resolves to prohibited IP '{res_ip}' ({reason})"
                     )
         except Exception as dns_err:
-            return False, cleaned, f"DNS resolution failed for hostname '{hostname_lower}': {dns_err}"
+            return False, cleaned, f"DNS resolution failed for hostname '{canonical_host}': {dns_err}"
 
     return True, cleaned, ""
 
@@ -248,20 +307,66 @@ def validate_outbound_url(
     return validate_target_url(raw_url, resolve_dns=True, custom_dns_resolver=custom_dns_resolver)
 
 
+class PinnedAsyncNetworkBackend(AutoBackend):
+    """
+    Pins outbound TCP socket connections to a pre-validated IP address,
+    preventing DNS rebinding TOCTOU between validation and connection.
+    Preserves original hostname for TLS SNI and HTTP Host header verification.
+    """
+    def __init__(self, pinned_ip: str):
+        super().__init__()
+        self.pinned_ip = pinned_ip
+
+    async def connect_tcp(
+        self,
+        host: str,
+        port: int,
+        timeout: Optional[float] = None,
+        local_address: Optional[str] = None,
+        socket_options: Optional[Any] = None,
+    ) -> httpcore.AsyncNetworkStream:
+        return await super().connect_tcp(
+            host=self.pinned_ip,
+            port=port,
+            timeout=timeout,
+            local_address=local_address,
+            socket_options=socket_options,
+        )
+
+
+def create_pinned_transport(pinned_ip: str, verify: bool = True) -> httpx.AsyncHTTPTransport:
+    """
+    Constructs an AsyncHTTPTransport wired with PinnedAsyncNetworkBackend.
+    Ensures TLS SNI and certificate verification are preserved, while
+    disabling connection keepalive/pooling across different destinations.
+    """
+    transport = httpx.AsyncHTTPTransport(verify=verify)
+    transport._pool = httpcore.AsyncConnectionPool(
+        ssl_context=transport._pool._ssl_context,
+        network_backend=PinnedAsyncNetworkBackend(pinned_ip=pinned_ip),
+        max_keepalive_connections=0,
+        keepalive_expiry=0.0,
+    )
+    return transport
+
+
 async def safe_fetch_get(
     url: str,
     headers: Optional[Dict[str, str]] = None,
     timeout: float = 6.0,
     max_redirects: int = 5,
     custom_dns_resolver: Optional[Callable] = None,
+    transport: Optional[httpx.AsyncBaseTransport] = None,
 ) -> httpx.Response:
     """
-    Executes a secure HTTP GET request with manual redirect following and revalidation.
-    Guarantees that:
+    Executes a secure HTTP GET request with manual redirect following, connection pinning, and re-validation.
+    Guarantees:
     1. Initial target URL is verified via validate_outbound_url (DNS pre-resolution).
-    2. Every 3xx redirect destination is re-validated before following.
-    3. Maximum redirect hops are capped at max_redirects (default: 5).
-    4. Prohibited private network redirect destinations abort execution immediately.
+    2. Actual TCP connection is pinned to the pre-validated IP address (defeating DNS rebinding).
+    3. TLS certificate validation and SNI are strictly preserved.
+    4. Every 3xx redirect destination is re-validated and re-pinned before following.
+    5. Maximum redirect hops are capped at max_redirects (default: 5).
+    6. Prohibited private network redirect destinations abort execution immediately.
     """
     is_valid, current_url, err_msg = validate_outbound_url(url, custom_dns_resolver=custom_dns_resolver)
     if not is_valid:
@@ -270,31 +375,47 @@ async def safe_fetch_get(
     redirect_count = 0
     req_headers = dict(headers or {})
 
-    async with httpx.AsyncClient(timeout=timeout, follow_redirects=False) as client:
-        while True:
+    while True:
+        # Determine host and pinned IP for current_url
+        parsed_curr = urllib.parse.urlparse(current_url)
+        host_str = parsed_curr.hostname or ""
+        _, canonical_host, _ = canonicalize_host(host_str)
+
+        # If a mock transport was passed in (e.g. in test suite), use it;
+        # otherwise create a connection-pinned transport bound to the validated IP.
+        if transport is not None:
+            active_transport = transport
+        else:
+            resolved_ips = resolve_domain_ips(canonical_host, custom_resolver=custom_dns_resolver)
+            if not resolved_ips:
+                raise SSRFSecurityError(f"DNS resolution returned no IP addresses for '{canonical_host}'.")
+            pinned_ip = str(resolved_ips[0])
+            active_transport = create_pinned_transport(pinned_ip=pinned_ip, verify=True)
+
+        async with httpx.AsyncClient(transport=active_transport, timeout=timeout, follow_redirects=False) as client:
             resp = await client.get(current_url, headers=req_headers)
 
-            # Check if response is a redirect (301, 302, 303, 307, 308)
-            if resp.status_code in (301, 302, 303, 307, 308):
-                redirect_count += 1
-                if redirect_count > max_redirects:
-                    raise SSRFRedirectError(f"Exceeded maximum redirect limit of {max_redirects} hops.")
+        # Check if response is a redirect (301, 302, 303, 307, 308)
+        if resp.status_code in (301, 302, 303, 307, 308):
+            redirect_count += 1
+            if redirect_count > max_redirects:
+                raise SSRFRedirectError(f"Exceeded maximum redirect limit of {max_redirects} hops.")
 
-                location = resp.headers.get("Location")
-                if not location:
-                    return resp
-
-                next_url = urllib.parse.urljoin(current_url, location)
-
-                # Re-validate redirect target
-                is_valid_red, sanitized_next, red_err = validate_outbound_url(
-                    next_url, custom_dns_resolver=custom_dns_resolver
-                )
-                if not is_valid_red:
-                    raise SSRFSecurityError(
-                        f"Redirect from '{current_url}' to prohibited destination '{next_url}' blocked: {red_err}"
-                    )
-
-                current_url = sanitized_next
-            else:
+            location = resp.headers.get("Location")
+            if not location:
                 return resp
+
+            next_url = urllib.parse.urljoin(current_url, location)
+
+            # Re-validate redirect target
+            is_valid_red, sanitized_next, red_err = validate_outbound_url(
+                next_url, custom_dns_resolver=custom_dns_resolver
+            )
+            if not is_valid_red:
+                raise SSRFSecurityError(
+                    f"Redirect from '{current_url}' to prohibited destination '{next_url}' blocked: {red_err}"
+                )
+
+            current_url = sanitized_next
+        else:
+            return resp

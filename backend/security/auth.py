@@ -12,6 +12,7 @@ Guarantees:
 """
 import os
 import secrets
+import subprocess
 from typing import Optional
 from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
@@ -20,6 +21,42 @@ _ACTIVE_SESSION_TOKEN: Optional[str] = None
 
 # HTTPBearer scheme (auto_error=False allows custom 401 error payloads)
 bearer_scheme = HTTPBearer(auto_error=False)
+
+
+def harden_token_file_permissions(token_path: str) -> bool:
+    """
+    Applies restrictive file system permissions to storage/.session_token:
+    - POSIX (Linux/macOS): chmod 0600 (owner read/write only).
+    - Windows (NTFS): uses icacls to reset inheritance and grant (R,W)
+      strictly to the active Windows user and SYSTEM.
+    Never prints or logs the token or credentials.
+    """
+    if not token_path or not os.path.isfile(token_path):
+        return False
+
+    if os.name != "nt":
+        try:
+            os.chmod(token_path, 0o600)
+            return True
+        except Exception:
+            return False
+    else:
+        try:
+            username = os.environ.get("USERNAME", "").strip()
+            if not username:
+                return False
+
+            cmd = ["icacls", token_path, "/inheritance:r", "/grant:r", f"{username}:(R,W)", "SYSTEM:(F)"]
+            res = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                check=False,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+            return res.returncode == 0
+        except Exception:
+            return False
 
 
 def _get_storage_token_path() -> str:
@@ -38,6 +75,7 @@ def get_or_create_session_token() -> str:
     1. Checks AGENTDESK_SESSION_TOKEN environment variable.
     2. Checks storage/.session_token file.
     3. If neither exists, generates a fresh 256-bit token and persists it.
+    Ensures secure file ACLs are enforced.
     """
     global _ACTIVE_SESSION_TOKEN
 
@@ -58,6 +96,7 @@ def get_or_create_session_token() -> str:
                 saved_token = f.read().strip()
             if saved_token and len(saved_token) >= 32:
                 _ACTIVE_SESSION_TOKEN = saved_token
+                harden_token_file_permissions(token_file)
                 return _ACTIVE_SESSION_TOKEN
         except Exception:
             pass
@@ -67,12 +106,7 @@ def get_or_create_session_token() -> str:
     try:
         with open(token_file, "w", encoding="utf-8") as f:
             f.write(new_token)
-        # Apply restrictive permissions on POSIX
-        if hasattr(os, "chmod") and os.name != "nt":
-            try:
-                os.chmod(token_file, 0o600)
-            except Exception:
-                pass
+        harden_token_file_permissions(token_file)
     except Exception:
         pass
 

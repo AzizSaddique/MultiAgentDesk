@@ -183,24 +183,24 @@ def test_html_extraction_skips_challenge_screens():
     assert sublinks == []
 
 def test_robots_txt_disallowed_fixture():
-    # Mock urllib response with restrictive robots.txt
-    mock_robots_content = b"User-agent: *\nDisallow: /private/\nDisallow: /admin/\n"
-    
-    with patch("urllib.request.urlopen") as mock_urlopen:
-        mock_resp = MagicMock()
-        mock_resp.status = 200
-        mock_resp.read.return_value = mock_robots_content
-        mock_resp.__enter__.return_value = mock_resp
-        mock_urlopen.return_value = mock_resp
+    # Mock safe_fetch_get_sync response with restrictive robots.txt
+    mock_robots_content = "User-agent: *\nDisallow: /private/\nDisallow: /admin/\n"
+    mock_resp = MagicMock()
+    mock_resp.status_code = 200
+    mock_resp.text = mock_robots_content
 
-        # Allowed path
-        allowed, _ = is_allowed_by_robots("https://company.test/public/page")
-        assert allowed is True
+    with patch("backend.providers.playwright_scraper.validate_outbound_url", return_value=(True, "https://company.test/public/page", "")):
+        with patch("backend.providers.playwright_scraper.safe_fetch_get_sync", return_value=mock_resp):
+            # Allowed path
+            allowed, _ = is_allowed_by_robots("https://company.test/public/page")
+            assert allowed is True
 
-        # Disallowed path
-        allowed_blocked, reason = is_allowed_by_robots("https://company.test/private/data")
-        assert allowed_blocked is False
-        assert "Disallowed by website robots.txt" in reason
+    with patch("backend.providers.playwright_scraper.validate_outbound_url", return_value=(True, "https://company.test/private/data", "")):
+        with patch("backend.providers.playwright_scraper.safe_fetch_get_sync", return_value=mock_resp):
+            # Disallowed path
+            allowed_blocked, reason = is_allowed_by_robots("https://company.test/private/data")
+            assert allowed_blocked is False
+            assert "Disallowed by website robots.txt" in reason
 
 def test_live_research_endpoint_missing_urls_diagnostic():
     payload = {

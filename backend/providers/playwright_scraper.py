@@ -7,12 +7,15 @@ import asyncio
 import sys
 import re
 import json
+import logging
 import urllib.robotparser
 import urllib.request
 from urllib.parse import urlparse, urljoin
 from typing import List, Tuple, Optional, Set, Dict, Any
 from datetime import datetime, timezone
 from bs4 import BeautifulSoup
+
+logger = logging.getLogger("agentdesk.providers.playwright_scraper")
 
 try:
     from .base import BaseResearchProvider
@@ -22,9 +25,11 @@ try:
         validate_outbound_url,
         is_prohibited_ip,
         safe_fetch_get,
+        safe_fetch_get_sync,
         SSRFSecurityError,
         SSRFRedirectError,
     )
+    from ..security.egress_proxy import SecureEgressProxy
 except (ImportError, ValueError):
     from providers.base import BaseResearchProvider
     from models import ResearchRequest, LeadRecord, CrawlDiagnostic
@@ -33,9 +38,11 @@ except (ImportError, ValueError):
         validate_outbound_url,
         is_prohibited_ip,
         safe_fetch_get,
+        safe_fetch_get_sync,
         SSRFSecurityError,
         SSRFRedirectError,
     )
+    from security.egress_proxy import SecureEgressProxy
 
 USER_AGENT = "AgentDesk-Bot/1.0 (+https://agentdesk.local/bot; ethical-public-researcher)"
 
@@ -45,30 +52,44 @@ def _sanitize_slug(text: str) -> str:
 
 def is_allowed_by_robots(target_url: str, user_agent: str = USER_AGENT, timeout: float = 3.0) -> Tuple[bool, str]:
     """
-    Checks robots.txt for the domain of the target URL.
+    Checks robots.txt for the domain of the target URL using safe_fetch_get_sync.
+    Enforces full SSRF validation, DNS resolution, connection pinning, and redirect checks.
     Returns (is_allowed, reason).
     """
-    is_valid, sanitized, reason = validate_target_url(target_url)
+    is_valid, sanitized, reason = validate_outbound_url(target_url)
     if not is_valid:
         return False, f"Target URL failed safety validation: {reason}"
     try:
-        parsed = urlparse(target_url)
+        parsed = urlparse(sanitized)
         robots_url = f"{parsed.scheme}://{parsed.netloc}/robots.txt"
         rp = urllib.robotparser.RobotFileParser()
         rp.set_url(robots_url)
-        
-        req = urllib.request.Request(robots_url, headers={"User-Agent": user_agent})
-        with urllib.request.urlopen(req, timeout=timeout) as response:
-            if response.status == 200:
-                content = response.read().decode('utf-8', errors='ignore')
+
+        try:
+            resp = safe_fetch_get_sync(
+                robots_url,
+                headers={"User-Agent": user_agent},
+                timeout=timeout,
+                max_redirects=3,
+            )
+            if resp.status_code == 200:
+                content = resp.text
                 rp.parse(content.splitlines())
                 allowed = rp.can_fetch(user_agent, target_url) or rp.can_fetch("*", target_url)
                 if not allowed:
                     return False, f"Disallowed by website robots.txt rules at {robots_url}"
                 return True, "Permitted by robots.txt"
-    except Exception:
-        # Standard convention: If robots.txt is missing or unreachable, crawling is permitted
-        return True, "robots.txt not found or unrestricted"
+            elif resp.status_code in (401, 403):
+                return False, f"Robots.txt access denied (HTTP {resp.status_code})"
+        except SSRFSecurityError as ssrf_err:
+            logger.warning(f"[PlaywrightScraper] robots.txt blocked by SSRF policy: {ssrf_err}")
+            return False, f"Robots.txt destination blocked by security policy: {ssrf_err}"
+        except Exception as fetch_err:
+            # Missing or network unreachable: standard convention permits crawling
+            logger.debug(f"[PlaywrightScraper] robots.txt not reachable ({fetch_err}); permitting crawl")
+            return True, "robots.txt not found or unrestricted"
+    except Exception as exc:
+        return True, f"robots.txt check exception ({exc}); unrestricted"
     return True, "Permitted"
 
 def _clean_extracted_emails(emails: Set[str], domain: str) -> List[str]:
@@ -363,15 +384,28 @@ class PlaywrightResearchProvider(BaseResearchProvider):
 
         browser = None
         context = None
+        egress_proxy = None
 
         try:
             from playwright.async_api import async_playwright
+
+            egress_proxy = SecureEgressProxy()
+            await egress_proxy.start()
+            proxy_config = egress_proxy.get_playwright_proxy_config()
+            launch_args = [
+                "--disable-gpu",
+                "--no-sandbox",
+                "--disable-dev-shm-usage",
+                "--disable-webrtc",
+                *egress_proxy.get_chromium_launch_args(),
+            ]
 
             async with async_playwright() as p:
                 try:
                     browser = await p.chromium.launch(
                         headless=True,
-                        args=["--disable-gpu", "--no-sandbox", "--disable-dev-shm-usage", "--disable-webrtc"]
+                        proxy=proxy_config,
+                        args=launch_args,
                     )
                     context = await browser.new_context(
                         user_agent=USER_AGENT,
@@ -615,6 +649,11 @@ class PlaywrightResearchProvider(BaseResearchProvider):
                     if browser is not None:
                         try:
                             await browser.close()
+                        except Exception:
+                            pass
+                    if egress_proxy is not None:
+                        try:
+                            await egress_proxy.stop()
                         except Exception:
                             pass
 

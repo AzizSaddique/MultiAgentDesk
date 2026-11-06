@@ -15,6 +15,8 @@ Validates:
 import io
 import csv
 import pytest
+from unittest.mock import patch
+import httpx
 from fastapi.testclient import TestClient
 
 from backend.main import app, DRAFT_REGISTRY
@@ -462,14 +464,15 @@ def test_source_evidence_distinguishes_website_and_directory(clean_tracker):
     provider = PublicBusinessDirectoryProvider()
 
     import asyncio
-    lead_record, outcome = asyncio.run(
-        service._inspect_and_verify_candidate(
-            candidate=candidate,
-            plan=plan,
-            job_id="job-evidence-test",
-            search_provider=provider,
+    with patch("backend.services.lead_discovery.safe_fetch_get", side_effect=httpx.ConnectError("Offline deterministic fixture")):
+        lead_record, outcome = asyncio.run(
+            service._inspect_and_verify_candidate(
+                candidate=candidate,
+                plan=plan,
+                job_id="job-evidence-test",
+                search_provider=provider,
+            )
         )
-    )
 
     assert outcome == "completed"
     assert lead_record is not None

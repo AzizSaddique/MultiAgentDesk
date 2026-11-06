@@ -18,6 +18,7 @@ from typing import Tuple, List, Optional, Callable, Dict, Any, Union
 import httpx
 import httpcore
 from httpcore._backends.auto import AutoBackend
+from httpcore._backends.sync import SyncBackend
 
 # Allowed schemes
 PERMITTED_SCHEMES = ("http", "https")
@@ -334,6 +335,48 @@ class PinnedAsyncNetworkBackend(AutoBackend):
         )
 
 
+class PinnedSyncNetworkBackend(SyncBackend):
+    """
+    Synchronous network backend that pins outbound TCP sockets directly to
+    the pre-validated IP address, defeating DNS rebinding for synchronous clients.
+    """
+    def __init__(self, pinned_ip: str):
+        super().__init__()
+        self.pinned_ip = pinned_ip
+
+    def connect_tcp(
+        self,
+        host: str,
+        port: int,
+        timeout: Optional[float] = None,
+        local_address: Optional[str] = None,
+        socket_options: Optional[Any] = None,
+    ) -> httpcore.NetworkStream:
+        return super().connect_tcp(
+            host=self.pinned_ip,
+            port=port,
+            timeout=timeout,
+            local_address=local_address,
+            socket_options=socket_options,
+        )
+
+
+def create_pinned_sync_transport(pinned_ip: str, verify: bool = True) -> httpx.HTTPTransport:
+    """
+    Constructs a synchronous HTTPTransport wired with PinnedSyncNetworkBackend.
+    Ensures TLS SNI and certificate verification are preserved, while
+    disabling connection keepalive/pooling across different destinations.
+    """
+    transport = httpx.HTTPTransport(verify=verify)
+    transport._pool = httpcore.ConnectionPool(
+        ssl_context=transport._pool._ssl_context,
+        network_backend=PinnedSyncNetworkBackend(pinned_ip=pinned_ip),
+        max_keepalive_connections=0,
+        keepalive_expiry=0.0,
+    )
+    return transport
+
+
 def create_pinned_transport(pinned_ip: str, verify: bool = True) -> httpx.AsyncHTTPTransport:
     """
     Constructs an AsyncHTTPTransport wired with PinnedAsyncNetworkBackend.
@@ -394,6 +437,77 @@ async def safe_fetch_get(
 
         async with httpx.AsyncClient(transport=active_transport, timeout=timeout, follow_redirects=False) as client:
             resp = await client.get(current_url, headers=req_headers)
+
+        # Check if response is a redirect (301, 302, 303, 307, 308)
+        if resp.status_code in (301, 302, 303, 307, 308):
+            redirect_count += 1
+            if redirect_count > max_redirects:
+                raise SSRFRedirectError(f"Exceeded maximum redirect limit of {max_redirects} hops.")
+
+            location = resp.headers.get("Location")
+            if not location:
+                return resp
+
+            next_url = urllib.parse.urljoin(current_url, location)
+
+            # Re-validate redirect target
+            is_valid_red, sanitized_next, red_err = validate_outbound_url(
+                next_url, custom_dns_resolver=custom_dns_resolver
+            )
+            if not is_valid_red:
+                raise SSRFSecurityError(
+                    f"Redirect from '{current_url}' to prohibited destination '{next_url}' blocked: {red_err}"
+                )
+
+            current_url = sanitized_next
+        else:
+            return resp
+
+
+def safe_fetch_get_sync(
+    url: str,
+    headers: Optional[Dict[str, str]] = None,
+    timeout: float = 6.0,
+    max_redirects: int = 5,
+    custom_dns_resolver: Optional[Callable] = None,
+    transport: Optional[httpx.BaseTransport] = None,
+) -> httpx.Response:
+    """
+    Synchronous equivalent of safe_fetch_get with manual redirect following, connection pinning, and re-validation.
+    Guarantees:
+    1. Initial target URL is verified via validate_outbound_url (DNS pre-resolution).
+    2. Actual TCP connection is pinned to the pre-validated IP address (defeating DNS rebinding).
+    3. TLS certificate validation and SNI are strictly preserved.
+    4. Every 3xx redirect destination is re-validated and re-pinned before following.
+    5. Maximum redirect hops are capped at max_redirects (default: 5).
+    6. Prohibited private network redirect destinations abort execution immediately.
+    """
+    is_valid, current_url, err_msg = validate_outbound_url(url, custom_dns_resolver=custom_dns_resolver)
+    if not is_valid:
+        raise SSRFSecurityError(f"Target URL '{url}' is restricted: {err_msg}")
+
+    redirect_count = 0
+    req_headers = dict(headers or {})
+
+    while True:
+        # Determine host and pinned IP for current_url
+        parsed_curr = urllib.parse.urlparse(current_url)
+        host_str = parsed_curr.hostname or ""
+        _, canonical_host, _ = canonicalize_host(host_str)
+
+        # If a mock transport was passed in, use it;
+        # otherwise create a connection-pinned transport bound to the validated IP.
+        if transport is not None:
+            active_transport = transport
+        else:
+            resolved_ips = resolve_domain_ips(canonical_host, custom_resolver=custom_dns_resolver)
+            if not resolved_ips:
+                raise SSRFSecurityError(f"DNS resolution returned no IP addresses for '{canonical_host}'.")
+            pinned_ip = str(resolved_ips[0])
+            active_transport = create_pinned_sync_transport(pinned_ip=pinned_ip, verify=True)
+
+        with httpx.Client(transport=active_transport, timeout=timeout, follow_redirects=False) as client:
+            resp = client.get(current_url, headers=req_headers)
 
         # Check if response is a redirect (301, 302, 303, 307, 308)
         if resp.status_code in (301, 302, 303, 307, 308):

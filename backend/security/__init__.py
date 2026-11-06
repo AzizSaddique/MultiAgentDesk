@@ -9,8 +9,11 @@ from .url_validator import (
     resolve_domain_ips,
     canonicalize_host,
     safe_fetch_get,
+    safe_fetch_get_sync,
     create_pinned_transport,
+    create_pinned_sync_transport,
     PinnedAsyncNetworkBackend,
+    PinnedSyncNetworkBackend,
     SSRFSecurityError,
     SSRFRedirectError,
 )
@@ -21,6 +24,7 @@ from .auth import (
     verify_token_value,
     harden_token_file_permissions,
 )
+from .egress_proxy import SecureEgressProxy
 
 __all__ = [
     "validate_target_url",
@@ -29,8 +33,12 @@ __all__ = [
     "resolve_domain_ips",
     "canonicalize_host",
     "safe_fetch_get",
+    "safe_fetch_get_sync",
     "create_pinned_transport",
+    "create_pinned_sync_transport",
     "PinnedAsyncNetworkBackend",
+    "PinnedSyncNetworkBackend",
+    "SecureEgressProxy",
     "SSRFSecurityError",
     "SSRFRedirectError",
     "get_session_token",
